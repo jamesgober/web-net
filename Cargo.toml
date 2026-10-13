@@ -1,0 +1,69 @@
+# =============================================================================
+#  R E P S   ·   web-net
+# =============================================================================
+[package]
+name    = "web-net"
+version = "0.1.0"
+
+# Minimum Supported Rust Version (MSRV)
+rust-version = "1.85"
+edition = "2024"
+
+# License
+license = "Apache-2.0 OR MIT"
+
+# Readme
+readme = "README.md"
+
+# Description
+description = "Web framework for Rust on serve-net: router, handlers, middleware with gate checkpoints, typed extractors, static files, CORS and security headers, error pages, health endpoints, and a render hand-off."
+
+# Keywords (5 max)
+keywords = ["web", "framework", "router", "http", "server"]
+
+# Categories
+categories = ["web-programming", "web-programming::http-server"]
+
+# Links
+homepage      = "https://github.com/jamesgober/web-net"
+repository    = "https://github.com/jamesgober/web-net"
+documentation = "https://docs.rs/web-net"
+
+# Authors
+authors = ["James Gober <me@jamesgober.com>"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "web_net"
+path = "src/lib.rs"
+
+
+# FEATURE FLAGS
+# #################################
+[features]
+default = []
+
+
+# DEPENDENCIES
+# #################################
+[dependencies]
+# None yet. Planned dependencies and the reason for each are listed in
+# dev/PLAN.md; each is added with the first code that needs it.
+
+
+# DEV DEPENDENCIES
+# #################################
+[dev-dependencies]
+
+
+# RELEASE PROFILE
+# #################################
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "abort"
+strip         = "symbols"
