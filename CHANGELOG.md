@@ -11,6 +11,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `dev/PLAN.md` section 6: session verification against the server record,
+  sudo mode for sensitive routes, and per-route session profiles.
+
 ---
 
 ## [0.1.0] - 2026-10-13

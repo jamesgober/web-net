@@ -94,6 +94,9 @@ web-net runs inside serve-net. It can also be driven in tests with no server at 
 | CSRF | state-changing methods require the session-bound token from gate-net unless the route opts out with a reason |
 | security headers | applied by default from shield-sec's policy |
 | errors leak nothing | section 9 |
+| sessions | the session adapter reads `__Host-sid` and calls gate-net, which verifies against the server record on every request (`gate-net/dev/SESSIONS.md`); nothing in the cookie is trusted |
+| sensitive actions | routes marked sensitive require sudo mode (a fresh second factor and the short-lived `__Host-sudo` token); a stolen ordinary session cannot perform them |
+| session profile | routes or groups choose the standard, strict, or paranoid session profile (`SESSIONS.md` section 10) |
 
 The HTTP adapters for serve-net's security slots live here: where the session cookie is read, how a customs refusal becomes a 422 page, how gate-sec's denial becomes a 403.
 
