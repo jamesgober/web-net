@@ -88,6 +88,7 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - [ ] A site in production on web-net for two weeks (James).
 - [ ] The gate crates on crates.io, and a test against them here (James: repositories).
 - [ ] Quiet-machine benchmarks.
+- [ ] `examples/site.rs` renders through Luminess's `Render` implementation (`luminess::web::Theme`, themed error pages) once Luminess accepts web-net 0.9 (asked: `>=0.8, <0.10`).
 
 ## v1.0.0 - Stable
 - [ ] James's decision, after the first site has run on it end to end.
