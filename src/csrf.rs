@@ -141,13 +141,17 @@ pub(crate) fn check(
             );
             // The specific refusals first: a second token is refused even
             // after a first one verified.
+            // Only a complete scan, or one stopped at the first file part,
+            // can count; every other error refuses, even after a token
+            // verified (a second token, a malformed part).
             match scanned {
+                Ok(_) if check.verified() => Ok(()),
+                Err(e) if e.code() == SCAN_DONE && check.verified() => Ok(()),
+                Ok(_) => Err("csrf.missing"),
+                Err(e) if e.code() == SCAN_DONE => Err("csrf.missing"),
                 Err(e) if e.code().starts_with("csrf.") => Err(e.code()),
                 Err(e) if e.code() == "policy.duplicate_token" => Err("csrf.duplicate"),
                 Err(e) if e.code() == "policy.token_field_late" => Err("csrf.missing"),
-                _ if check.verified() => Ok(()),
-                Ok(_) => Err("csrf.missing"),
-                Err(e) if e.code() == SCAN_DONE => Err("csrf.missing"),
                 Err(_) => Err("csrf.unreadable_form"),
             }
         }

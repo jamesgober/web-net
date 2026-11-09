@@ -315,11 +315,18 @@ fn test_multipart_token_is_checked_before_the_handler() {
         );
         b
     };
+    // A valid token, then a second one: refused, as on the urlencoded and
+    // header paths (form-net's review).
+    let two_tokens = format!(
+        "--B\r\nContent-Disposition: form-data; name=csrf_token\r\n\r\n{t}\r\n--B\r\nContent-Disposition: form-data; name=csrf_token\r\n\r\nOTHER\r\n--B\r\nContent-Disposition: form-data; name=doc; filename=a.txt\r\n\r\nhi\r\n--B--"
+    )
+    .into_bytes();
     for (body, code) in [
         (multipart("forged", false), "csrf.malformed"),
         (no_token, "csrf.missing"),
         (b"--B--".to_vec(), "csrf.missing"),
         (file_first, "csrf.missing"),
+        (two_tokens, "csrf.duplicate"),
     ] {
         let r = post_to(&app, "/lazy", Some("s1"), "", MP, &body);
         assert_eq!(r.status, 403, "{code}");
