@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party runtime dependencies.
     </p>
     <blockquote>
-        <strong>Status: <code>0.5.0</code>.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
+        <strong>Status: <code>0.6.0</code>.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
     </blockquote>
 </div>
 
@@ -40,7 +40,7 @@
 
 ```toml
 [dependencies]
-web-net = "0.5"
+web-net = "0.6"
 serve-net = "0.7"
 ```
 
@@ -100,7 +100,9 @@ Forms and uploads through form-net (`Cx::form`, `Cx::upload`), CSRF through csrf
 
 Negotiation (JSON error replies, `Cx::language`), CORS per route or group, gzip compression, cache policies with a report a cache in front can trust (`App::serve`), and several sites in one table (`Sites`).
 
-Coming next (see the roadmap): benchmarks and the allocation-free hot path (0.6), hardening and fuzzing (0.7).
+Performance: the warm request path allocates nothing, route lookup does not grow with the number of routes, and web-net adds well under a microsecond of its own work per request (`docs/PERFORMANCE.md`).
+
+Coming next (see the roadmap): hardening and fuzzing (0.7).
 
 <hr>
 <br>
