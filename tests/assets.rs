@@ -227,6 +227,67 @@ fn test_refused_names_and_folders() {
     assert_eq!((r.status, h(&r, "allow")), (405, "GET, HEAD, OPTIONS"));
 }
 
+/// Windows answers a file by its 8.3 short name too (`ENVSEC~1` for
+/// `.envsecret`); the resolved name is what is checked. Skipped on volumes
+/// that make no short names.
+#[cfg(windows)]
+#[test]
+fn test_short_names_do_not_reach_hidden_files() {
+    let d = Dir::new("shortnames");
+    std::fs::write(d.0.join(".envsecret"), b"SECRET").unwrap();
+    let app = app(&d);
+    for short in ["ENVSEC~1", "envsec~1"] {
+        if std::fs::canonicalize(d.0.join(short)).is_err() {
+            continue;
+        }
+        let r = send(&app, &format!("GET /static/{short} HTTP/1.1\r\nHost: a"));
+        assert_eq!(r.status, 404, "{short}");
+    }
+}
+
+#[test]
+fn test_more_device_names() {
+    let d = Dir::new("devices");
+    let app = app(&d);
+    for p in [
+        "/static/COM%C2%B9",
+        "/static/lpt%C2%B3.log",
+        "/static/CON%20.txt",
+    ] {
+        assert_eq!(
+            send(&app, &format!("GET {p} HTTP/1.1\r\nHost: a")).status,
+            404,
+            "{p}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_unreadable_file_is_a_clean_500() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = Dir::new("unreadable");
+    let f = d.0.join("locked.txt");
+    std::fs::write(&f, b"x").unwrap();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&f).is_ok() {
+        return; // running as root: the file is readable anyway
+    }
+    let app = app(&d);
+    let r = send(&app, "GET /static/locked.txt HTTP/1.1\r\nHost: a");
+    assert_eq!(r.status, 500);
+    assert_eq!(h(&r, "etag"), "");
+    assert_eq!(h(&r, "cache-control"), "no-store");
+    assert_eq!(
+        r.headers
+            .iter()
+            .filter(|(n, _)| n == "content-type")
+            .count(),
+        1
+    );
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn test_symlink_out_of_the_root_is_refused() {

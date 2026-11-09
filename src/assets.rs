@@ -109,13 +109,31 @@ impl Assets {
 /// Windows device names, refused everywhere so a site behaves the same on
 /// every system.
 fn is_device_name(seg: &str) -> bool {
-    let stem = seg.split('.').next().unwrap_or(seg).to_ascii_uppercase();
-    matches!(
+    // Windows ignores spaces before the extension (`CON .txt`) and takes
+    // superscript digits as port numbers (`COM¹`).
+    let stem = seg
+        .split('.')
+        .next()
+        .unwrap_or(seg)
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(
         stem.as_str(),
         "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-        && stem.len() == 4
-        && stem.as_bytes()[3].is_ascii_digit())
+    ) {
+        return true;
+    }
+    let Some(port) = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+    else {
+        return false;
+    };
+    let mut chars = port.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('0'..='9' | '¹' | '²' | '³'), None)
+    )
 }
 
 /// Whether a decoded segment may name a file.
@@ -148,11 +166,11 @@ pub(crate) fn find(assets: &Assets, rel: &str, accept_encoding: Option<&[u8]>) -
         }
         path.push(seg.as_ref());
     }
-    let mut meta = inside(&assets.root, &path)?;
+    let mut meta = inside(&assets.root, &path, assets.hidden)?;
     if meta.1.is_dir() {
         let index = assets.index.as_deref()?;
         path = meta.0.join(index);
-        meta = inside(&assets.root, &path)?;
+        meta = inside(&assets.root, &path, assets.hidden)?;
     }
     let (file, md) = meta;
     if !md.is_file() {
@@ -182,7 +200,7 @@ pub(crate) fn find(assets: &Assets, rel: &str, accept_encoding: Option<&[u8]>) -
             let mut alt = found.path.clone().into_os_string();
             alt.push(".");
             alt.push(ext);
-            if let Some((p, m)) = inside(&assets.root, Path::new(&alt)) {
+            if let Some((p, m)) = inside(&assets.root, Path::new(&alt), assets.hidden) {
                 if m.is_file() {
                     found.path = p;
                     found.len = m.len();
@@ -196,10 +214,19 @@ pub(crate) fn find(assets: &Assets, rel: &str, accept_encoding: Option<&[u8]>) -
 }
 
 /// Resolves `path` and checks it is still under `root` (both canonical).
-fn inside(root: &Path, path: &Path) -> Option<(PathBuf, std::fs::Metadata)> {
+fn inside(root: &Path, path: &Path, hidden: bool) -> Option<(PathBuf, std::fs::Metadata)> {
     let real = std::fs::canonicalize(path).ok()?;
-    if !real.starts_with(root) {
-        return None;
+    let below = real.strip_prefix(root).ok()?;
+    // The resolved names are checked again: a request may name a file by
+    // another spelling the file system resolves (a Windows 8.3 short name
+    // such as `ENVSEC~1` for `.envsecret`, or a link inside the folder).
+    for part in below.components() {
+        let std::path::Component::Normal(name) = part else {
+            return None;
+        };
+        if !name.to_str().is_some_and(|n| safe_segment(n, hidden)) {
+            return None;
+        }
     }
     let md = std::fs::metadata(&real).ok()?;
     Some((real, md))
@@ -220,13 +247,14 @@ fn etag(found: &Found) -> String {
     format!("\"{:x}-{:x}{coding}\"", found.len, nanos)
 }
 
-/// Answers a request for a file.
+/// Answers a request for a file. `None` when the file could not be read
+/// (nothing was written; the caller answers 500).
 pub(crate) fn serve(
     assets: &Assets,
     found: &Found,
     req: &HttpRequest<'_>,
     reply: &mut HttpReply,
-) -> Outcome {
+) -> Option<Outcome> {
     let tag = etag(found);
     let opaque = &tag.as_bytes()[1..tag.len() - 1];
     let current = EntityTag::strong(opaque).ok();
@@ -252,13 +280,13 @@ pub(crate) fn serve(
     if let (Some(inm), Some(cur)) = (req.header("if-none-match"), current.as_ref()) {
         if parse_net::if_none_match(inm, cur).unwrap_or(false) {
             head(reply, 304);
-            return Outcome::Done;
+            return Some(Outcome::Done);
         }
     } else if let (Some(ims), Some(lm)) = (req.header("if-modified-since"), last_modified) {
         if let Ok(since) = parse_net::http_date(ims) {
             if lm <= since {
                 head(reply, 304);
-                return Outcome::Done;
+                return Some(Outcome::Done);
             }
         }
     }
@@ -280,7 +308,7 @@ pub(crate) fn serve(
                     Ok(RangeOutcome::Unsatisfiable) => {
                         head(reply, 416);
                         reply.header("content-range", format!("bytes */{}", found.len));
-                        return Outcome::Done;
+                        return Some(Outcome::Done);
                     }
                     _ => {}
                 }
@@ -291,6 +319,14 @@ pub(crate) fn serve(
     let (status, start, len) = match range {
         Some(r) => (206, r.start, r.end - r.start + 1),
         None => (200, 0, found.len),
+    };
+    // Read (or at least open) the file before any field is written, so a
+    // file that cannot be read leaves an empty reply for the 500.
+    let inline = if len <= INLINE_LIMIT {
+        Some(read_at(&found.path, start, len as usize)?)
+    } else {
+        drop(File::open(&found.path).ok()?);
+        None
     };
     head(reply, status);
     reply
@@ -305,35 +341,20 @@ pub(crate) fn serve(
             format!("bytes {}-{}/{}", r.start, r.end, found.len),
         );
     }
-    if req.method() == Method::Head {
-        // The length is the body's: read nothing for a small file's HEAD
-        // beyond what the GET would send.
-        if len <= INLINE_LIMIT {
-            return match read_at(&found.path, start, len as usize) {
-                Some(bytes) => {
-                    reply.body(&bytes);
-                    Outcome::Done
-                }
-                None => fail(reply),
-            };
-        }
-        reply.stream();
-        return Outcome::Done;
+    // A small file goes whole (for HEAD too: its length is the body's).
+    if let Some(bytes) = inline {
+        reply.body(&bytes);
+        return Some(Outcome::Done);
     }
-    if len <= INLINE_LIMIT {
-        return match read_at(&found.path, start, len as usize) {
-            Some(bytes) => {
-                reply.body(&bytes);
-                Outcome::Done
-            }
-            None => fail(reply),
-        };
+    if req.method() == Method::Head {
+        reply.stream();
+        return Some(Outcome::Done);
     }
     // Sent in parts: serve-net calls again for each part, with the same
     // request; `sent` says where the next part starts. The status and fields
     // set above leave with the first part only.
     let sent = reply.stream().sent();
-    send_part(found, start, len, sent, reply)
+    Some(send_part(found, start, len, sent, reply))
 }
 
 fn send_part(found: &Found, start: u64, len: u64, sent: u64, reply: &mut HttpReply) -> Outcome {
@@ -364,11 +385,6 @@ fn read_at(path: &Path, start: u64, len: usize) -> Option<Vec<u8>> {
     let mut buf = Vec::with_capacity(len);
     f.take(len as u64).read_to_end(&mut buf).ok()?;
     Some(buf)
-}
-
-fn fail(reply: &mut HttpReply) -> Outcome {
-    reply.text(500, "the file could not be read");
-    Outcome::Done
 }
 
 /// The media type for a file name, by extension. Text types carry UTF-8.

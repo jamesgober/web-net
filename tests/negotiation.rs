@@ -120,10 +120,7 @@ fn test_cors_preflight() {
     );
     assert_eq!(r.status, 204);
     assert_eq!(h(&r, "access-control-allow-origin"), "https://app.example");
-    assert_eq!(
-        h(&r, "access-control-allow-methods"),
-        "GET, HEAD, POST, OPTIONS"
-    );
+    assert_eq!(h(&r, "access-control-allow-methods"), "GET, HEAD, POST");
     assert_eq!(h(&r, "access-control-allow-headers"), "content-type");
     assert_eq!(h(&r, "access-control-allow-credentials"), "true");
     assert_eq!(h(&r, "access-control-max-age"), "60");
@@ -169,6 +166,39 @@ fn test_cors_actual_replies() {
     let r = send(
         &app,
         "GET /private HTTP/1.1\r\nHost: a\r\nOrigin: https://app.example",
+    );
+    assert_eq!(h(&r, "access-control-allow-origin"), "");
+}
+
+#[test]
+fn test_preflight_lists_only_methods_under_the_policy() {
+    let app = App::builder()
+        .route(
+            get("/items", |cx| {
+                cx.text(200, "items");
+                Ok(())
+            })
+            .public()
+            .cors(Cors::new().origin("https://app.example")),
+        )
+        .route(
+            web_net::delete("/items", |cx| {
+                cx.text(200, "gone");
+                Ok(())
+            })
+            .public()
+            .csrf_exempt("test"),
+        )
+        .build()
+        .unwrap();
+    let r = send(
+        &app,
+        "OPTIONS /items HTTP/1.1\r\nHost: a\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: GET",
+    );
+    assert_eq!(h(&r, "access-control-allow-methods"), "GET, HEAD");
+    let r = send(
+        &app,
+        "OPTIONS /items HTTP/1.1\r\nHost: a\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: DELETE",
     );
     assert_eq!(h(&r, "access-control-allow-origin"), "");
 }
@@ -339,7 +369,9 @@ fn test_cache_policy_and_report() {
     assert_eq!(h(&r, "cache-control"), "public, max-age=120");
     let r = send(&front, "GET /news HTTP/1.1\r\nHost: a\r\nCookie: sid=x");
     assert_eq!(h(&r, "cache-control"), "private, no-store");
-    let _ = send(&front, "GET /cookie HTTP/1.1\r\nHost: a");
+    // A reply with a cookie is never public, whatever the policy says.
+    let r = send(&front, "GET /cookie HTTP/1.1\r\nHost: a");
+    assert_eq!(h(&r, "cache-control"), "private, no-store");
     let r = send(&front, "GET /me HTTP/1.1\r\nHost: a");
     assert_eq!(h(&r, "cache-control"), "no-store");
     let r = send(&front, "GET /own HTTP/1.1\r\nHost: a");
@@ -354,7 +386,9 @@ fn test_cache_policy_and_report() {
             Cacheable::No,
             Cacheable::No,
             Cacheable::No,
-            Cacheable::Guests { max_age: 60 },
+            // The handler set its own Cache-Control: not the policy's
+            // public value, so never reported keepable.
+            Cacheable::No,
             Cacheable::No,
         ]
     );

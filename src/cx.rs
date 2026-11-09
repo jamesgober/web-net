@@ -120,7 +120,6 @@ pub struct Cx<'r, I> {
     pub(crate) out: &'r mut Out,
     pub(crate) shared: &'r Shared,
     pub(crate) template: Option<TemplateId>,
-    pub(crate) csrf: crate::csrf::State,
     pub(crate) binding: Option<&'r [u8]>,
     pub(crate) limits: &'r form_net::Limits,
     pub(crate) before_render: &'r [crate::app::HookFn<I>],
@@ -211,27 +210,23 @@ impl<'r, I> Cx<'r, I> {
         Ok(found)
     }
 
-    /// The raw request body.
+    /// The raw request body. On an unsafe method its CSRF token was
+    /// checked before the handler ran.
     ///
     /// # Errors
     ///
-    /// 403 `csrf.unverified` for a multipart body whose CSRF token has not
-    /// been checked yet: read it with [`form`](Self::form) or
-    /// `upload` (feature `uploads`), which check the token in the same pass.
+    /// None today; reading the body stays fallible so a content inspector
+    /// can refuse it in a later version without changing handlers.
     pub fn body(&self) -> Result<&'r [u8]> {
-        if self.csrf == crate::csrf::State::Pending {
-            return Err(Error::forbidden("csrf.unverified"));
-        }
         Ok(self.req.http.body_bytes())
     }
 
     /// Reads the body as a typed form (urlencoded or multipart text fields),
     /// with the route's [`form_limits`](crate::Route::form_limits).
     ///
-    /// A multipart body's CSRF token is checked in the same pass (it must
-    /// come before any file part). A form type that is posted with a token
-    /// lists the token field in its `ignore` list (`ignore =
-    /// ["csrf_token"]`).
+    /// On an unsafe method the CSRF token was checked before the handler
+    /// ran. A form type that is posted with a token lists the token field in
+    /// its `ignore` list (`ignore = ["csrf_token"]`).
     ///
     /// The error keeps form-net's detail, so an action can render the form
     /// again with 422; `?` turns it into an [`Error`] with its status.
@@ -278,35 +273,19 @@ impl<'r, I> Cx<'r, I> {
     ) -> std::result::Result<T, form_net::FormError> {
         let content_type = self.req.header("content-type").unwrap_or(b"");
         let body = self.req.http.body_bytes();
-        match (self.csrf, self.shared.csrf.as_ref(), self.binding) {
-            (crate::csrf::State::Pending, Some(engine), Some(binding)) => {
-                let mut check = crate::csrf::token_check(engine, binding);
-                let result = T::from_body_inspected(
-                    content_type,
-                    body,
-                    self.limits,
-                    &crate::csrf::TOKEN_POLICY,
-                    &mut (&mut check, inspector),
-                );
-                if check.verified() {
-                    self.csrf = crate::csrf::State::Verified;
-                }
-                result
-            }
-            _ => T::from_body_inspected(
-                content_type,
-                body,
-                self.limits,
-                &form_net::Policy::DEFAULT,
-                inspector,
-            ),
-        }
+        T::from_body_inspected(
+            content_type,
+            body,
+            self.limits,
+            &form_net::Policy::DEFAULT,
+            inspector,
+        )
     }
 
     /// Reads a multipart upload into `store` (feature `uploads`): text
     /// fields in memory, files in the store's private temporary files, with
-    /// the route's form limits. The CSRF token is checked before any file
-    /// byte is stored. Turn the result into a typed form with
+    /// the route's form limits. The CSRF token was checked before the
+    /// handler ran, so a forged one stores nothing. Turn the result into a typed form with
     /// `T::from_upload(upload)`.
     ///
     /// # Errors
@@ -335,34 +314,14 @@ impl<'r, I> Cx<'r, I> {
     ) -> std::result::Result<form_net::Upload, form_net::FormError> {
         let content_type = self.req.header("content-type").unwrap_or(b"");
         let body = self.req.http.body_bytes();
-        match (self.csrf, self.shared.csrf.as_ref(), self.binding) {
-            (crate::csrf::State::Pending, Some(engine), Some(binding)) => {
-                let mut check = crate::csrf::token_check(engine, binding);
-                let mut hooks = (&mut check, inspector);
-                let mut session = form_net::UploadSession::new(
-                    content_type,
-                    self.limits,
-                    &crate::csrf::TOKEN_POLICY,
-                    store,
-                )?;
-                session.push(body, &mut hooks)?;
-                let upload = session.finish(&mut hooks)?;
-                if hooks.0.verified() {
-                    self.csrf = crate::csrf::State::Verified;
-                }
-                Ok(upload)
-            }
-            _ => {
-                let mut session = form_net::UploadSession::new(
-                    content_type,
-                    self.limits,
-                    &form_net::Policy::DEFAULT,
-                    store,
-                )?;
-                session.push(body, inspector)?;
-                session.finish(inspector)
-            }
-        }
+        let mut session = form_net::UploadSession::new(
+            content_type,
+            self.limits,
+            &form_net::Policy::DEFAULT,
+            store,
+        )?;
+        session.push(body, inspector)?;
+        session.finish(inspector)
     }
 
     /// A CSRF token for the visitor's session, to put in a form's hidden
@@ -462,6 +421,14 @@ impl<'r, I> Cx<'r, I> {
     pub fn media(&self, offers: &[&'static str]) -> Option<&'static str> {
         let i = parse_net::best_media(self.req.header("accept"), offers)?;
         offers.get(i).copied()
+    }
+
+    /// The reply body's buffer, emptied, for a writer that appends to a
+    /// `Vec<u8>` (a template engine with its own API writing straight in).
+    /// Set `content-type` yourself; the page budget does not apply here.
+    pub fn body_mut(&mut self) -> &mut Vec<u8> {
+        self.out.body.clear();
+        &mut self.out.body
     }
 
     /// Status, `content-type: text/html; charset=utf-8`, and the HTML.

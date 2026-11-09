@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) &rarr; [`DIRECTIVES.md`](./DIRECTIVES.md) &rarr; **this file** &rarr; [`ROADMAP.md`](./ROADMAP.md).
 >
-> **Status:** `0.6.0`: performance (benchmarks, no allocation on the warm path). Negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
+> **Status:** `0.7.0`: hardening (attack tests, property tests, fuzzing, `docs/SECURITY.md`). Performance at `0.6.0`, negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
 
 ---
 
@@ -85,7 +85,7 @@ Why authentication runs before routing: a ban, an expired session, or a forged t
 |---|---|---|
 | host | the authority (absolute-form target or `Host`) is matched against the declared hosts, case-insensitively, a trailing dot ignored, any port unless the declared host names one | one site per address set |
 | aliases | an alias is redirected to the first declared host (301, 308 for unsafe methods) | one address per page |
-| unknown host | 421 when hosts are declared; with none declared the site answers any host | a site never serves a host it does not own |
+| unknown host | 421 when hosts are declared (an empty or missing `Host` included); with none declared the site answers any host | a site never serves a host it does not own |
 | development | `localhost`, `127.0.0.1`, `[::1]`, `*.localhost` are the site only on a builder marked `development()`; HTTPS is not required for them | production never trusts "localhost" in a `Host` field |
 | HTTPS | `https_only()` redirects plain HTTP to `https://` on the canonical host; it needs a declared host, so a redirect is never built from the request's `Host` | no host-header poisoning through redirects |
 | base path | `/blog`: removed before routing, added back by `Cx::url` and every redirect; `/blog` itself is redirected to `/blog/`; paths outside get 404 | the site works installed in a folder and moves without editing routes |
@@ -93,7 +93,7 @@ Why authentication runs before routing: a ban, an expired session, or a forged t
 | canonical form | each decoded segment re-encoded one way: RFC 3986 `pchar` bytes (unreserved, sub-delims, `:`, `@`) written as they are, every other byte as upper-case `%XX` | each path has exactly one spelling, so route literals compare byte for byte |
 | dot segments | `.` and `..` removed after decoding (`%2e%2e` is `..`), never above the root | `..` can never escape a folder |
 | empty segments | `//` collapses | one URL per page |
-| trailing slash | one policy per site: `Strip` (default), `Add` (not for a last segment with a dot), `Ignore` | one URL per page, unless the site says otherwise |
+| trailing slash | one policy per site: `Strip` (default), `Add` (a last segment with a dot loses its slash instead), `Ignore` | one URL per page, unless the site says otherwise |
 | case | `lowercase_paths()` redirects paths with upper-case letters | for sites that promise lower-case URLs |
 | redirect | any path not in canonical form is redirected to it, query kept: 301 for `GET` and `HEAD`, 308 otherwise | users and search engines see one address; a POST keeps its method and body |
 | query | read on demand by `Cx::query`: `+` is a space, escapes decoded; a name that appears twice is a 400 | most pages never read the query; parameter pollution is refused, never resolved |
@@ -231,7 +231,8 @@ pub trait View {
 
 - `Assets::new(mount, dir)`, added with `Builder::assets`. Served in the early step, before the gate and the router: files are public. A route under a mount stops the build (it could never run).
 - The path is canonical already (section 4). Each decoded segment is checked again for what file systems read specially, on every platform so a site behaves the same everywhere: a leading dot (`.env`, `.git`; `hidden_files(true)` allows them), `:` (Windows alternate data streams and drive letters), a trailing dot or space (Windows drops them, so `secret.txt.` would open `secret.txt`), `\`, NUL, and the Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, with any extension). Any of them is a 404.
-- The joined path is resolved (`canonicalize`) and must still be under the resolved root, so a symbolic link cannot lead out of the folder. Links that stay inside work. The window between the check and the open is only reachable by someone who can write into the folder.
+- The joined path is resolved (`canonicalize`) and must still be under the resolved root, so a symbolic link cannot lead out of the folder, and every resolved name below the root passes the same segment rules: a Windows 8.3 short name (`ENVSEC~1` for `.envsecret`) or a link inside the folder cannot reach a name the request could not spell. Links that stay inside work. The window between the check and the open is only reachable by someone who can write into the folder.
+- The file is read (or, for a large one, opened) before any field is written; one that cannot be read is a clean 500. A file that disappears between the parts of a large reply ends the connection.
 - A folder is a 404 unless the mount has an `index` file. There are never listings.
 - Validators: a strong `ETag` from the length, the modification time (nanoseconds), and the coding; `Last-Modified`. `If-None-Match` (weak comparison) answers 304; without it, `If-Modified-Since` does. Malformed conditions are ignored, as RFC 9110 says.
 - Ranges (`GET` only): one range is a 206 with `Content-Range`; an unsatisfiable one a 416 with `bytes */length`; several ranges, or an `If-Range` that does not match, get the whole file (RFC 9110 lets a server ignore `Range`). `Accept-Ranges: bytes`.
@@ -268,10 +269,12 @@ Every unsafe method (`POST`, `PUT`, `PATCH`, `DELETE`) on a route that is not ex
 
 1. **Binding.** The identity's `csrf_binding()` (the session id, or a pre-session id the gate gives guests). None: 403 `csrf.no_binding`.
 2. **Origin policy** (csrf-sec): `Sec-Fetch-Site`, `Origin`, `Referer` against the request's own origin. Cross-site or a foreign origin: 403.
-3. **Token**, from exactly one `X-CSRF-Token` field, or else from the `csrf_token` form field:
-   - urlencoded: checked here, with form-net's own parser and the route's limits, so the handler runs only with a verified token;
-   - multipart: checked by `Cx::form` or `Cx::upload` in the pass that reads the body; the token must come before any file part, so a forged token stores nothing. Until then `Cx::body` refuses (403 `csrf.unverified`), and a handler that returns without reading its form has its whole reply replaced with 403 (and a `Failed` event: a handler bug);
+3. **Token**, from exactly one `X-CSRF-Token` field, or else from the `csrf_token` form field, always checked here, before any hook or handler runs:
+   - urlencoded: read with form-net's own parser and the route's limits;
+   - multipart: read up to the first file part, where the token must already have come (form-net's token placement policy), so an upload is not read twice and a forged or late token stores nothing;
    - anything else (no field, another content type): 403 `csrf.missing`.
+
+(0.4 checked a multipart token in the pass that read the form and replaced the reply when the handler never read it. An independent review in 0.7 showed the handler's side effects could happen first; the token is now checked before the handler for every encoding, D-046.)
 
 `Cx::csrf_token()` issues a token for the visitor's binding, masked differently on every call.
 
@@ -289,13 +292,15 @@ Cost [est., csrf-sec's own measurements]: about 110 ns to verify a token and abo
 | `Public { max_age }` | `public, max-age=N` | `public, max-age=N` |
 | `Guests { max_age }` | `public, max-age=N` | `private, no-store` |
 
-`App::serve(req, env, who, reply) -> Served { outcome, route, cache }` tells a cache in front of web-net whether it may keep the reply for guests: `Cacheable::Guests { max_age }` only when the policy is `Guests` or `Public`, the request was a guest's `GET` or `HEAD`, the status is 200, the reply sets no cookie, and it varies on nothing but `Accept-Encoding`. Everything else is `Cacheable::No`. The cache keys and invalidates on its own terms; web-net only says what is safe to keep.
+A reply that sets a cookie (the handler's, or the gate's through `Identity::set_cookie`) gets `private, no-store` under any policy but `Unset`: a shared cache must never hand one visitor's cookie to the next.
+
+`App::serve(req, env, who, reply) -> Served { outcome, route, cache }` tells a cache in front of web-net whether it may keep the reply for guests: `Cacheable::Guests { max_age }` only when the policy is `Guests` or `Public`, web-net set the `Cache-Control` itself (the handler did not), the route has no CORS policy, the request was a guest's `GET` or `HEAD`, the status is 200, no cookie is set, and the reply varies on nothing but `Accept-Encoding`. Everything else is `Cacheable::No`. The cache keys and invalidates on its own terms; web-net only says what is safe to keep.
 
 ### 12.5 CORS
 
 `Cors` (on a route or a group): exact origins, or `any_origin()` (answered `*`, never with credentials: the build refuses the pair), allowed request fields, exposed reply fields, credentials, preflight lifetime. Every policy is checked at build (an origin is `scheme://host[:port]` with no path; field names are tokens).
 
-- A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) for a route with a policy is answered before the gate (preflights carry no credentials): 204 with `Access-Control-Allow-Origin`, `-Methods` (the path's), `-Headers`, `-Credentials`, `-Max-Age`, `Vary: origin` when the origin, the method, and every requested field are allowed; 204 without them otherwise, and a `cors.denied` event.
+- A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) for a route with a policy is answered before the gate (preflights carry no credentials): 204 with `Access-Control-Allow-Origin`, `-Methods` (the path's methods whose routes share this policy), `-Headers`, `-Credentials`, `-Max-Age`, `Vary: origin` when the origin, the method, and every requested field are allowed; 204 without them otherwise, and a `cors.denied` event.
 - Replies of a route with a policy carry `Vary: origin`, and, for an allowed origin, `Access-Control-Allow-Origin` (`-Credentials`, `-Expose-Headers`).
 - Routes without a policy never answer with CORS fields.
 - CORS is not authentication and does not lift CSRF: an origin allowed for unsafe methods must also be allowed in csrf-sec's builder (`allow_origin`), or the client sends the token in `X-CSRF-Token`.
@@ -327,7 +332,7 @@ Cost [est., csrf-sec's own measurements]: about 110 ns to verify a token and abo
 | compression side channels (BREACH) | compression off by default; csrf-sec masks tokens per reply | 0.5 (done) |
 | resource exhaustion | serve-net's limits; web-net's page budget, segment limit (256), parameter limit (8), field limit (64) | 0.2 |
 
-Every row has an attack test by 0.7.
+Every row has an attack test in `tests/attacks.rs` (ids T-1 to T-15 in `docs/SECURITY.md`).
 
 ---
 
@@ -395,7 +400,9 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 
 - In-process pipeline tests through `serve_net::testing` (`tests/pipeline.rs`): routing, params, methods, HEAD, OPTIONS, redirects, refusals, sites, gates, sign-in, `respond_identified`, build errors, error replies, panics, hooks, render, checkpoints, classify.
 - Unit tests per module: normalization (every rule, idempotence), patterns, trie precedence and backtracking.
-- From 0.7: property tests (two spellings reach one route; normalization is idempotent and never rises above the root), fuzz targets for normalization, routing, and query decoding, and an attack test for every threat.
+- Attack tests (`tests/attacks.rs`), one per threat.
+- Property tests: normalization idempotent and clean, every spelling reaches one canonical path, decoding inverts the canonical encoding (`src/url.rs`); lookup sound and complete against the plain definition (`src/router.rs`).
+- Fuzz targets (`fuzz/`): `request` (any bytes as requests on a keep-alive connection) and `path` (any target: no redirect loops, no bypass of the gate).
 - From 0.6: criterion benchmarks for normalization, lookup at 10,000 routes, and the pipeline overhead per request.
 
 ---
@@ -458,3 +465,10 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-041 | 2026-11-08 | `Hook::BeforeRender` added; no after-response hook | after-response work (access logs, analytics) belongs to serve-net's observer and web-net's events, off the request path |
 | D-042 | 2026-11-08 | The warm request path allocates nothing, checked by a counting-allocator test against bare serve-net | a regression shows up as a failing test, not as a slow week |
 | D-043 | 2026-11-08 | `Accept` is parsed only when it names JSON | most requests never ask for JSON; the error-reply choice should cost them nothing |
+| D-044 | 2026-11-08 | `OPTIONS *` meets the host check like any request | a host the site does not serve learns nothing from it |
+| D-046 | 2026-11-09 | Multipart CSRF tokens are checked before the handler, scanning the body up to its first file part | the 0.4 design let a handler run (and change state) before its reply was replaced; found by an independent review |
+| D-047 | 2026-11-09 | A reply that sets a cookie is never `public`; the cacheability report needs web-net's own `Cache-Control`, no CORS policy, and no cookie | a shared cache must not spread one visitor's cookie or one origin's CORS answer |
+| D-048 | 2026-11-09 | Resolved asset names below the root pass the segment rules again | 8.3 short names reached dot files on Windows |
+| D-049 | 2026-11-09 | An asset is read before any field is written; a vanished file mid-reply closes the connection | no 500 with a file's validators and cache lifetime, no error page inside a file |
+| D-050 | 2026-11-09 | With hosts declared, an empty or missing `Host` is a 421; under `TrailingSlash::Add` a file-like path loses its slash | one rule for every request; one spelling per path |
+| D-045 | 2026-11-08 | `Identity::set_cookie` and `Denial::with_cookie`: a cookie the gate sets leaves on every exit of `respond`, once; `respond_identified` leaves it to its caller; such replies are never keepable by a cache | a gate clearing a dead session must reach the browser even when the request is refused, without two writers sending it twice |

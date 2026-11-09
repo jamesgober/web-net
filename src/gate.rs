@@ -21,6 +21,16 @@ pub trait Identity: Send + Sync + 'static {
     fn csrf_binding(&self) -> Option<&[u8]> {
         None
     }
+
+    /// A `Set-Cookie` value the gate wants on the reply (a dead session's
+    /// cookie cleared, a pre-session id set). [`App::respond`](crate::App::respond)
+    /// writes it on every exit after authentication, once; with
+    /// [`App::respond_identified`](crate::App::respond_identified) the caller
+    /// authenticated and writes its own. A reply that carries it is never
+    /// reported as keepable by a cache.
+    fn set_cookie(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// The identity of [`Open`]: everyone is a guest.
@@ -138,10 +148,11 @@ pub enum DenialKind {
 
 /// A refusal from a gate: what the visitor sees, and a stable code for logs
 /// and events (never shown to the visitor).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Denial {
     kind: DenialKind,
     code: &'static str,
+    cookie: Option<Box<str>>,
 }
 
 impl Denial {
@@ -151,6 +162,7 @@ impl Denial {
         Self {
             kind: DenialKind::SignIn,
             code,
+            cookie: None,
         }
     }
 
@@ -160,6 +172,7 @@ impl Denial {
         Self {
             kind: DenialKind::Forbidden,
             code,
+            cookie: None,
         }
     }
 
@@ -169,6 +182,7 @@ impl Denial {
         Self {
             kind: DenialKind::Hidden,
             code,
+            cookie: None,
         }
     }
 
@@ -181,7 +195,25 @@ impl Denial {
         } else {
             DenialKind::Forbidden
         };
-        Self { kind, code }
+        Self {
+            kind,
+            code,
+            cookie: None,
+        }
+    }
+
+    /// A `Set-Cookie` value the refusal carries (a dead session's cookie
+    /// cleared): written on the denial's reply.
+    #[must_use]
+    pub fn with_cookie(mut self, set_cookie: impl Into<Box<str>>) -> Self {
+        self.cookie = Some(set_cookie.into());
+        self
+    }
+
+    /// The `Set-Cookie` value, if any.
+    #[must_use]
+    pub fn cookie(&self) -> Option<&str> {
+        self.cookie.as_deref()
     }
 
     /// What the visitor is told.
@@ -213,6 +245,7 @@ impl fmt::Debug for Denial {
         f.debug_struct("Denial")
             .field("kind", &self.kind)
             .field("code", &self.code)
+            .field("cookie", &self.cookie.as_ref().map(|_| "<set>"))
             .finish()
     }
 }

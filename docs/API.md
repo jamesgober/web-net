@@ -1,6 +1,6 @@
 # web-net - API Reference
 
-> Every public item in `web-net`, with examples. Version `0.6.0`.
+> Every public item in `web-net`, with examples. Version `0.7.0`.
 > Design and reasons: [`../dev/PLAN.md`](../dev/PLAN.md).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
@@ -155,7 +155,8 @@ Named functions (`fn account(cx: &mut Cx<'_, User>) -> web_net::Result`) need no
 | `param(name) -> Option<Cow<str>>` | a route parameter, decoded |
 | `param_as::<T>(name) -> Result<T>` | parsed; 404 `route.param` when it does not parse |
 | `query(name) -> Result<Option<Cow<str>>>` | decoded; 400 `query.duplicate` for a repeated name |
-| `body() -> Result<&[u8]>` | the raw body; 403 for a multipart body whose CSRF token is unchecked |
+| `body() -> Result<&[u8]>` | the raw body (on an unsafe method, its CSRF token was checked before the handler) |
+| `body_mut() -> &mut Vec<u8>` | the reply body buffer, emptied, for an engine that writes into a `Vec<u8>` |
 | `form::<T>() -> Result<T, FormError>` | a typed form, the token checked in the same pass |
 | `form_inspected::<T, N>(&mut N)` | the same with an inspector |
 | `upload(&Store) -> Result<Upload, FormError>` | an upload (feature `uploads`); `upload_inspected` |
@@ -186,6 +187,7 @@ The reply is held by web-net until the handler returns; on an error or a panic i
 pub trait Identity: Send + Sync + 'static {
     fn is_guest(&self) -> bool;
     fn csrf_binding(&self) -> Option<&[u8]> { None }
+    fn set_cookie(&self) -> Option<&str> { None }   // written on every exit of respond
 }
 pub trait Gate: Send + Sync + 'static {
     type Identity: Identity;
@@ -206,6 +208,8 @@ impl Denial {
     pub const fn kind(&self) -> DenialKind;
     pub const fn code(&self) -> &'static str;
     pub const fn status_code(&self) -> u16;
+    pub fn with_cookie(self, set_cookie: impl Into<Box<str>>) -> Self;
+    pub fn cookie(&self) -> Option<&str>;
 }
 pub enum DenialKind { SignIn, Forbidden, Hidden, Status(u16) }
 ```
@@ -347,7 +351,7 @@ let app = App::with_gate(G)
 # Ok::<(), web_net::BuildError>(())
 ```
 
-The rules (binding, origin policy, where the token may come from, what is refused): PLAN section 12.3. Codes: `csrf.no_binding`, `csrf.missing`, `csrf.duplicate`, `csrf.unverified`, `csrf.unreadable_form`, `csrf.no_engine`, and csrf-sec's reasons as `csrf.<reason>` (`csrf.bad_mac`, `csrf.cross_site`, ...).
+The rules (binding, origin policy, where the token may come from, what is refused): PLAN section 12.3. Codes: `csrf.no_binding`, `csrf.missing`, `csrf.duplicate`, `csrf.unreadable_form`, `csrf.no_engine`, and csrf-sec's reasons as `csrf.<reason>` (`csrf.bad_mac`, `csrf.cross_site`, ...).
 
 ## CORS, caching, compression, sites
 

@@ -948,7 +948,9 @@ impl<G: Gate> App<G> {
         let listed = |list: &[Box<str>]| host_listed(list, full, host_only);
         let dev = site.development && is_dev_host(host_only);
         let mut target_host: Option<&str> = None;
-        if !site.hosts.is_empty() && !dev && !authority.is_empty() && !listed(&site.hosts) {
+        // With hosts declared, an empty or missing Host is as unknown as any
+        // other host.
+        if !site.hosts.is_empty() && !dev && !listed(&site.hosts) {
             if listed(&site.aliases) {
                 target_host = site.hosts.first().map(AsRef::as_ref);
             } else {
@@ -989,8 +991,12 @@ impl<G: Gate> App<G> {
                     }
                 }
                 TrailingSlash::Add => {
-                    let last = rel.rsplit('/').next().unwrap_or("");
-                    if !rel.ends_with('/') && !last.contains('.') {
+                    let trimmed = rel.strip_suffix('/').unwrap_or(rel);
+                    let file_like = trimmed.rsplit('/').next().unwrap_or("").contains('.');
+                    if file_like && rel.ends_with('/') {
+                        // `/style.css/` and `/style.css` are one page: no slash.
+                        fixed = Some(trimmed.to_owned());
+                    } else if !file_like && !rel.ends_with('/') {
                         fixed = Some(format!("{rel}/"));
                     }
                 }
@@ -1037,6 +1043,20 @@ impl<G: Gate> App<G> {
             json: wants_json(http.header("accept")),
         };
         if raw_path == "*" {
+            // The host is checked as for any request: `OPTIONS *` to a host
+            // the site does not serve is a 421 too.
+            if self.claim(authority, &self.shared.base).is_none() {
+                self.refuse(
+                    421,
+                    "host.unknown",
+                    EventKind::Refused,
+                    None,
+                    None,
+                    at,
+                    reply,
+                );
+                return Outcome::Done;
+            }
             if method == Method::Options {
                 reply.status(204).header("allow", self.allow_all.as_bytes());
                 self.secure(reply, at.tls, |_| false);
@@ -1084,7 +1104,7 @@ impl<G: Gate> App<G> {
             return outcome;
         }
 
-        let mut req = Request {
+        let req = Request {
             http,
             env,
             path: &path,
@@ -1096,6 +1116,7 @@ impl<G: Gate> App<G> {
 
         // Authentication, unless the caller did it.
         let owned;
+        let owned_here = who.is_none();
         let who: &G::Identity = match who {
             Some(w) => w,
             None => match self.gate.authenticate(&req) {
@@ -1110,8 +1131,45 @@ impl<G: Gate> App<G> {
             },
         };
 
+        let gate_cookie = if owned_here { who.set_cookie() } else { None };
+        let outcome = self.routed(
+            http,
+            env,
+            at,
+            req,
+            who,
+            gate_cookie.is_some(),
+            reply,
+            report,
+        );
+        // The gate's own cookie (a dead session cleared, a pre-session id
+        // set) leaves on every exit after authentication, once. A caller
+        // that authenticated itself writes its own.
+        if let Some(c) = gate_cookie {
+            reply.header("set-cookie", c.as_bytes());
+            report.cache = Cacheable::No;
+        }
+        outcome
+    }
+
+    /// Steps 4 onward: route, method, authorization, CSRF, the handler.
+    #[allow(clippy::too_many_arguments)]
+    fn routed<'r>(
+        &'r self,
+        http: &HttpRequest<'_>,
+        env: &Envelope,
+        at: At<'_>,
+        mut req: Request<'r>,
+        who: &G::Identity,
+        cookie_pending: bool,
+        reply: &mut HttpReply,
+        report: &mut Served,
+    ) -> Outcome {
+        let method = http.method();
+        let path = req.path;
+        let host_raw = req.host;
         // Route and method.
-        let Some((ep, caps)) = self.trie.find(&path) else {
+        let Some((ep, caps)) = self.trie.find(path) else {
             self.refuse(404, "route.none", EventKind::Refused, None, None, at, reply);
             return Outcome::Done;
         };
@@ -1125,13 +1183,26 @@ impl<G: Gate> App<G> {
                     let wanted = Method::from_bytes(wanted);
                     let cors = self
                         .entry_for(ep as usize, wanted)
-                        .and_then(|i| self.entries[i as usize].cors.as_deref());
+                        .and_then(|i| self.entries[i as usize].cors.as_ref());
                     if let Some(cors) = cors {
+                        // Only the methods whose routes share this policy.
+                        let mut set = MethodSet::EMPTY;
+                        for m in endpoint.set.iter() {
+                            let shares = self.entry_for(ep as usize, m).is_some_and(|i| {
+                                self.entries[i as usize]
+                                    .cors
+                                    .as_ref()
+                                    .is_some_and(|c| Arc::ptr_eq(c, cors))
+                            });
+                            if shares {
+                                set = set.with(m);
+                            }
+                        }
                         let ok = cors.preflight(
                             origin,
                             wanted,
                             http.header("access-control-request-headers"),
-                            endpoint.set,
+                            set,
                             reply,
                         );
                         if !ok {
@@ -1200,7 +1271,7 @@ impl<G: Gate> App<G> {
 
         // CSRF on unsafe methods.
         let binding = who.csrf_binding();
-        let csrf_state = match (&self.shared.csrf, entry.csrf) {
+        match (&self.shared.csrf, entry.csrf) {
             (Some(engine), true) => {
                 let scheme = if env.client().scheme() == Scheme::Https {
                     "https://"
@@ -1209,7 +1280,7 @@ impl<G: Gate> App<G> {
                 };
                 let own = format!("{scheme}{}", host_raw.to_ascii_lowercase());
                 match csrf::check(engine, http, binding, &own, &entry.limits) {
-                    Ok(s) => s,
+                    Ok(()) => {}
                     Err(code) => {
                         self.refuse(403, code, EventKind::Denied, req.route, None, at, reply);
                         return Outcome::Done;
@@ -1229,8 +1300,8 @@ impl<G: Gate> App<G> {
                 );
                 return Outcome::Done;
             }
-            (_, false) => csrf::State::Off,
-        };
+            (_, false) => {}
+        }
 
         // The handler, with its hooks, on a buffer web-net holds.
         let mut out = SCRATCH.with(Cell::take).unwrap_or_default();
@@ -1240,7 +1311,7 @@ impl<G: Gate> App<G> {
             req,
             who,
             caps,
-            (csrf_state, binding),
+            (cookie_pending, binding),
             &mut out,
             reply,
             &mut report.cache,
@@ -1286,7 +1357,13 @@ impl<G: Gate> App<G> {
             self.not_get(method, at, reply);
             return Some(Outcome::Done);
         }
-        let Some(found) = assets::find(assets, rel, http.header("accept-encoding")) else {
+        let found = assets::find(assets, rel, http.header("accept-encoding"));
+        if found.is_none() && reply.stream().sent() > 0 {
+            // The file went away between parts: end the reply, which has
+            // already started.
+            return Some(Outcome::Close);
+        }
+        let Some(found) = found else {
             self.refuse(
                 404,
                 "assets.none",
@@ -1298,7 +1375,18 @@ impl<G: Gate> App<G> {
             );
             return Some(Outcome::Done);
         };
-        let outcome = assets::serve(assets, &found, http, reply);
+        let Some(outcome) = assets::serve(assets, &found, http, reply) else {
+            self.refuse(
+                500,
+                "assets.unreadable",
+                EventKind::Failed,
+                None,
+                None,
+                at,
+                reply,
+            );
+            return Some(Outcome::Done);
+        };
         self.secure(reply, at.tls, |_| false);
         Some(outcome)
     }
@@ -1328,7 +1416,7 @@ impl<G: Gate> App<G> {
         req: Request<'_>,
         who: &G::Identity,
         caps: Captures,
-        (csrf_state, binding): (csrf::State, Option<&[u8]>),
+        (cookie_pending, binding): (bool, Option<&[u8]>),
         out: &mut Out,
         reply: &mut HttpReply,
         cacheable: &mut Cacheable,
@@ -1341,7 +1429,7 @@ impl<G: Gate> App<G> {
         let route = req.route;
         let http = req.http;
         let guest = who.is_guest();
-        let (result, unverified) = {
+        let result = {
             let mut cx = Cx {
                 req,
                 who,
@@ -1350,13 +1438,12 @@ impl<G: Gate> App<G> {
                 out: &mut *out,
                 shared: &self.shared,
                 template: entry.template,
-                csrf: csrf_state,
                 binding,
                 limits: &entry.limits,
                 before_render: &entry.before_render,
                 rendering: false,
             };
-            let result = catch_unwind(AssertUnwindSafe(|| -> Result {
+            catch_unwind(AssertUnwindSafe(|| -> Result {
                 for h in entry.routed.iter() {
                     h(&mut cx)?;
                 }
@@ -1365,29 +1452,24 @@ impl<G: Gate> App<G> {
                     h(&mut cx)?;
                 }
                 Ok(())
-            }));
-            (result, cx.csrf == csrf::State::Pending)
+            }))
         };
         match result {
-            Ok(Ok(())) if unverified => {
-                // A multipart route whose handler never read its form: the
-                // token was never checked, so nothing it wrote may leave.
-                out.reset();
-                self.refuse(
-                    403,
-                    "csrf.unverified",
-                    EventKind::Failed,
-                    route,
-                    None,
-                    at,
-                    reply,
-                );
-                Outcome::Done
-            }
             Ok(Ok(())) if !out.invalid => {
-                if !out.has("cache-control") {
+                // A reply that sets a cookie is never public: a shared cache
+                // would give one visitor's cookie to every guest.
+                let cookies = cookie_pending || out.has("set-cookie");
+                let ours = !out.has("cache-control");
+                if ours {
                     let (for_guest, for_member) = &entry.cache_values;
-                    if let Some(v) = if guest { for_guest } else { for_member } {
+                    let value = if cookies && !matches!(entry.cache, CachePolicy::Unset) {
+                        Some("private, no-store")
+                    } else if guest {
+                        for_guest.as_deref()
+                    } else {
+                        for_member.as_deref()
+                    };
+                    if let Some(v) = value {
                         out.header("cache-control", v.as_bytes());
                     }
                 }
@@ -1397,9 +1479,11 @@ impl<G: Gate> App<G> {
                 *cacheable = match entry.cache {
                     CachePolicy::Guests { max_age } | CachePolicy::Public { max_age }
                         if guest
+                            && ours
+                            && !cookies
+                            && entry.cors.is_none()
                             && matches!(http.method(), Method::Get | Method::Head)
                             && out.status == 200
-                            && !out.has("set-cookie")
                             && out
                                 .get("vary")
                                 .is_none_or(|v| v.eq_ignore_ascii_case(b"accept-encoding")) =>
@@ -1497,6 +1581,9 @@ impl<G: Gate> App<G> {
                     self.event(EventKind::Denied, env, req.route, 303, d.code(), None);
                     reply.status(303).header("location", loc.as_bytes());
                     self.secure(reply, at.tls, |_| false);
+                    if let Some(c) = d.cookie() {
+                        reply.header("set-cookie", c.as_bytes());
+                    }
                     return;
                 }
             }
@@ -1513,6 +1600,9 @@ impl<G: Gate> App<G> {
         );
         if status == 401 {
             reply.header("www-authenticate", self.shared.challenge.as_bytes());
+        }
+        if let Some(c) = d.cookie() {
+            reply.header("set-cookie", c.as_bytes());
         }
     }
 
