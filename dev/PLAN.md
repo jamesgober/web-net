@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) &rarr; [`DIRECTIVES.md`](./DIRECTIVES.md) &rarr; **this file** &rarr; [`ROADMAP.md`](./ROADMAP.md).
 >
-> **Status:** `0.5.0`: negotiation, CORS, compression, caching, several sites. Actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
+> **Status:** `0.6.0`: performance (benchmarks, no allocation on the warm path). Negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
 
 ---
 
@@ -373,11 +373,11 @@ No third-party runtime dependency. First-party crates at published versions only
 
 ## 16. Costs
 
-Every number is an estimate until the 0.6 benchmarks.
+Estimates [est.] until measured; the measured numbers and the method are in `docs/PERFORMANCE.md` (0.6: web-net adds about 0.7 µs of its own work per request, plus about 0.35 µs for the default security headers, on a loaded machine; 0.00 allocations per warm request).
 
 | Step | Cost [est.] | Allocation |
 |---|---|---|
-| host match | 20-50 ns | one small lower-case copy of the authority (to be removed in 0.6) |
+| host match | 20-50 ns | none (case-insensitive comparison, 0.6) |
 | canonical path check (fast path) | 10-50 ns | none |
 | non-canonical path (redirect) | 0.3-1 µs | the canonical string; the request ends with the redirect |
 | route lookup | 20-100 ns | none |
@@ -456,3 +456,5 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-039 | 2026-11-08 | `CachePolicy` per route; `App::serve` reports whether a guest's reply may be kept by a cache in front | the front cache can skip the application for guests without ever keeping a personal page |
 | D-040 | 2026-11-08 | `Sites` prefers a listed host, then the longest base | a folder site and a root site on one host each get their own paths |
 | D-041 | 2026-11-08 | `Hook::BeforeRender` added; no after-response hook | after-response work (access logs, analytics) belongs to serve-net's observer and web-net's events, off the request path |
+| D-042 | 2026-11-08 | The warm request path allocates nothing, checked by a counting-allocator test against bare serve-net | a regression shows up as a failing test, not as a slow week |
+| D-043 | 2026-11-08 | `Accept` is parsed only when it names JSON | most requests never ask for JSON; the error-reply choice should cost them nothing |

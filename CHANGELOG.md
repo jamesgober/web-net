@@ -13,6 +13,26 @@
 
 ---
 
+## [0.6.0] - 2026-11-08
+
+Performance.
+
+### Added
+
+- `benches/web.rs` (criterion): web-net against bare serve-net, 10,000
+  routes, redirects, 404s, with and without security headers.
+  `docs/PERFORMANCE.md` with the method and the numbers.
+- `tests/alloc.rs`: the warm request path allocates nothing (counted).
+- `tests/scale.rs`: 10,000 routes.
+
+### Changed
+
+- Host checks compare case-insensitively instead of copying the host per
+  request; `Cache-Control` values are made at build; `Accept` is parsed only
+  when it names JSON. No behaviour change.
+
+---
+
 ## [0.5.0] - 2026-11-08
 
 Negotiation, CORS, compression, caching, and several sites.
@@ -164,7 +184,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jamesgober/web-net/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamesgober/web-net/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamesgober/web-net/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/web-net/compare/v0.2.0...v0.3.0

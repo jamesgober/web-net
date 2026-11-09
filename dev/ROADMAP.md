@@ -49,10 +49,12 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - [x] `Hook::BeforeRender`.
 - Not done, with reasons (PLAN D-038, D-041): Brotli for dynamic replies (no encoder in compress-lib; revisit if one is added); an after-response hook (serve-net's observer and web-net's events cover it). A per-variant cache inside web-net is not planned: the report lets a cache in front do it, and keeping one in web-net would duplicate it.
 
-## v0.6.0 - Performance
-- [ ] criterion benchmarks: normalization, lookup at 10,000 routes, pipeline overhead, error page; baselines recorded.
-- [ ] Remove the per-request host copy; allocation-free hot path verified by a counting allocator test.
-- [ ] Adopt a serve-net reply buffer API if available (PLAN O-4).
+## v0.6.0 - Performance (DONE, 2026-11-08)
+- [x] criterion benchmarks (`benches/web.rs`): pipeline overhead against bare serve-net, 10,000 routes, a deep route, a redirect, a 404, with and without security headers; numbers in `docs/PERFORMANCE.md`.
+- [x] Per-request host copies removed; precomputed `Cache-Control` values; `Accept` parsed only when it names JSON.
+- [x] Allocation-free warm path verified by a counting-allocator test (`tests/alloc.rs`): 0.00 allocations per request.
+- [x] The router at 10,000 routes (`tests/scale.rs`).
+- Moved to 0.9 (polish pass): the quiet-machine rerun with the per-step split, because the machine stayed loaded by other jobs through this release; numbers taken under load are kept only as relative. Moved to when serve-net offers it: the reply buffer API (PLAN O-4).
 
 ## v0.7.0 - Hardening
 - [ ] Attack tests for every threat in PLAN section 13.
@@ -66,6 +68,7 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 
 ## v0.9.0 - Beta
 - [ ] Pre-1.0 polish pass: every accepted gap, deferred item, and missed target revisited.
+- [ ] Benchmarks on a quiet machine, with the per-step split (moved from 0.6).
 - [ ] Adversarial review, findings fixed test-first.
 - [ ] `dev/READINESS-1.0.md` for James.
 

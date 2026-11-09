@@ -170,6 +170,8 @@ struct Entry<G: Gate> {
     limits: form_net::Limits,
     cors: Option<Arc<Cors>>,
     cache: CachePolicy,
+    /// `Cache-Control` for guests and for signed-in visitors, made once.
+    cache_values: (Option<Box<str>>, Option<Box<str>>),
     routed: Box<[HookFn<G::Identity>]>,
     finish: Box<[HookFn<G::Identity>]>,
     before_render: Box<[HookFn<G::Identity>]>,
@@ -699,6 +701,10 @@ impl<G: Gate> Builder<G> {
                     limits: r.form_limits,
                     cors: r.cors.clone(),
                     cache: r.cache,
+                    cache_values: (
+                        r.cache.value(true).map(String::into_boxed_str),
+                        r.cache.value(false).map(String::into_boxed_str),
+                    ),
                     routed: pick(Hook::Routed),
                     finish: pick(Hook::Finish),
                     before_render: pick(Hook::BeforeRender),
@@ -805,8 +811,28 @@ fn split_port(a: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Case-insensitive, so no request needs a lower-case copy of its host.
 fn is_dev_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "[::1]") || host.ends_with(".localhost")
+    const SUFFIX: &[u8] = b".localhost";
+    let b = host.as_bytes();
+    ["localhost", "127.0.0.1", "[::1]"]
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case(host))
+        || (b.len() > SUFFIX.len() && b[b.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX))
+}
+
+/// The authority without trailing dots, and its host without the port.
+fn host_parts(authority: &str) -> (&str, &str) {
+    let full = authority.trim_end_matches('.');
+    (full, split_port(full).0.trim_end_matches('.'))
+}
+
+/// Whether a declared host (lower case) names this authority: the whole
+/// authority, or the host when the declared one has no port.
+fn host_listed(list: &[Box<str>], full: &str, host: &str) -> bool {
+    list.iter().any(|h| {
+        h.eq_ignore_ascii_case(full) || (split_port(h).1.is_none() && h.eq_ignore_ascii_case(host))
+    })
 }
 
 thread_local! {
@@ -918,15 +944,8 @@ impl<G: Gate> App<G> {
     ) -> Placed<'a> {
         let site = &self.site;
         let authority = authority.unwrap_or("");
-        let lower = authority.to_ascii_lowercase();
-        let lower = lower.trim_end_matches('.');
-        let host_only = split_port(lower).0.trim_end_matches('.');
-        let listed = |list: &[Box<str>]| {
-            list.iter().any(|h| {
-                let h = h.as_ref();
-                h == lower || (split_port(h).1.is_none() && h == host_only)
-            })
-        };
+        let (full, host_only) = host_parts(authority);
+        let listed = |list: &[Box<str>]| host_listed(list, full, host_only);
         let dev = site.development && is_dev_host(host_only);
         let mut target_host: Option<&str> = None;
         if !site.hosts.is_empty() && !dev && !authority.is_empty() && !listed(&site.hosts) {
@@ -1367,7 +1386,8 @@ impl<G: Gate> App<G> {
             }
             Ok(Ok(())) if !out.invalid => {
                 if !out.has("cache-control") {
-                    if let Some(v) = entry.cache.value(guest) {
+                    let (for_guest, for_member) = &entry.cache_values;
+                    if let Some(v) = if guest { for_guest } else { for_member } {
                         out.header("cache-control", v.as_bytes());
                     }
                 }
@@ -1588,15 +1608,8 @@ impl<G: Gate> App<G> {
     /// the host's rank (2 listed or an alias, 1 a development host, 0 any
     /// host accepted) and the base path's length. `None`: not this site.
     pub(crate) fn claim(&self, authority: Option<&str>, path: &str) -> Option<(u8, usize)> {
-        let lower = authority.unwrap_or("").to_ascii_lowercase();
-        let lower = lower.trim_end_matches('.');
-        let host_only = split_port(lower).0.trim_end_matches('.');
-        let listed = |list: &[Box<str>]| {
-            list.iter().any(|h| {
-                let h = h.as_ref();
-                h == lower || (split_port(h).1.is_none() && h == host_only)
-            })
-        };
+        let (full, host_only) = host_parts(authority.unwrap_or(""));
+        let listed = |list: &[Box<str>]| host_listed(list, full, host_only);
         let rank = if self.site.hosts.is_empty() {
             0
         } else if listed(&self.site.hosts) || listed(&self.site.aliases) {
@@ -1619,8 +1632,8 @@ impl<G: Gate> App<G> {
         if env.client().scheme() != Scheme::Https {
             return false;
         }
-        let a = authority.unwrap_or("").to_ascii_lowercase();
-        !(self.site.development && is_dev_host(split_port(a.trim_end_matches('.')).0))
+        let (_, host) = host_parts(authority.unwrap_or(""));
+        !(self.site.development && is_dev_host(host))
     }
 }
 
@@ -1642,7 +1655,9 @@ impl<G: Gate> fmt::Debug for App<G> {
 
 /// Whether the client prefers JSON to HTML (no `Accept`: HTML).
 fn wants_json(accept: Option<&[u8]>) -> bool {
-    accept.is_some() && parse_net::best_media(accept, &["text/html", "application/json"]) == Some(1)
+    // Most requests never name JSON: skip the parse for them.
+    accept.is_some_and(|a| a.windows(4).any(|w| w.eq_ignore_ascii_case(b"json")))
+        && parse_net::best_media(accept, &["text/html", "application/json"]) == Some(1)
 }
 
 /// gzip for a reply worth compressing that the client accepts. Adds `Vary`
