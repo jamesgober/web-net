@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) &rarr; [`DIRECTIVES.md`](./DIRECTIVES.md) &rarr; **this file** &rarr; [`ROADMAP.md`](./ROADMAP.md).
 >
-> **Status:** `0.8.0`: alpha (the API as it should freeze; checked against the integrations that exist). Hardening at `0.7.0`. Performance at `0.6.0`, negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
+> **Status:** `0.9.0`: beta (the pre-1.0 polish pass; `dev/READINESS-1.0.md`). Alpha at `0.8.0`. Hardening at `0.7.0`. Performance at `0.6.0`, negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
 
 ---
 
@@ -422,6 +422,7 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | O-2 | Handlers synchronous? | yes; slow work is declared with `.work()` and moved by a dispatcher in front (answered at 0.2) |
 | O-4 | Ask serve-net for a reply body buffer handed out (or a reply reset) so the held reply's copy can go | yes, for serve-net 0.8 or 0.9 |
 | O-5 | Redirect status for a non-canonical `GET`: 301 or 308 | 301 (universally cached and understood); 308 for unsafe methods |
+| O-8 | Request bodies streamed by serve-net (`BodyPolicy::Stream`) | not supported: web-net reads the body once, buffered (serve-net's default), for CSRF and forms; a route that needs streaming uploads is a 1.x addition |
 | O-7 | Ask serve-net for an explicit abort of a reply in parts (today web-net returns `Deferred` without deferring, which serve-net answers with an abortive close once the head has left) | yes, for serve-net 0.8 or 0.9 |
 | O-6 | Should 405 and automatic `OPTIONS` answer before authorization (revealing a route's methods to anyone)? | yes, as now: CORS preflights carry no credentials, and the methods of a route are not a secret; a route that must stay hidden uses `Denial::hidden` and its own `OPTIONS` |
 
@@ -475,6 +476,8 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-042 | 2026-11-08 | The warm request path allocates nothing, checked by a counting-allocator test against bare serve-net | a regression shows up as a failing test, not as a slow week |
 | D-043 | 2026-11-08 | `Accept` is parsed only when it names JSON | most requests never ask for JSON; the error-reply choice should cost them nothing |
 | D-044 | 2026-11-08 | `OPTIONS *` meets the host check like any request | a host the site does not serve learns nothing from it |
+| D-059 | 2026-11-09 | `Sites` lets a site with lower-case paths claim upper-case spellings of its base | it redirects them itself, instead of another site answering |
+| D-060 | 2026-11-09 | The CSRF step always applies csrf-sec's origin policy and a token; csrf-sec's `Mode` setting does not loosen it | one strict rule for every route; a looser mode would need its own decision |
 | D-056 | 2026-11-09 | `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]` | web-net makes them and callers read them; a field added in 1.x must not break anyone |
 | D-057 | 2026-11-09 | `Cx::next_path` reads the sign-in redirect's `next` and returns it only when it is a path of this site | the sign-in page is the classic open-redirect target |
 | D-058 | 2026-11-09 | `Render` has a generic associated view type (`type View<'a>: ?Sized`); `App`, `Builder`, `Cx`, `Route`, and `Sites` are generic over the engine (`E = NoRender`); dynamic engines use `type View<'a> = dyn View + 'a` and handlers call `Cx::render_view`; error pages go through `Render::error_page` | agreed with the Luminess session and the coordinator: a typed engine compiles templates at boot against the application's own types and reads them directly, which `&dyn View` cannot carry (one wrapper per nested value); a GAT keeps borrowed views working for both kinds, and static dispatch costs nothing at run time |

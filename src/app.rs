@@ -313,6 +313,9 @@ impl<G: Gate, E: Render> Builder<G, E> {
     /// [`web_net::csrf_sec`](crate::csrf_sec)), built from a persisted
     /// 32-byte key. Required as soon as one route takes an unsafe method and
     /// is not [exempt](crate::Route::csrf_exempt).
+    ///
+    /// web-net always applies the origin policy and a token, whatever the
+    /// `Csrf`'s `Mode`; its keys, lifetimes, and allowed origins apply as set.
     #[must_use]
     pub fn csrf(mut self, csrf: csrf_sec::Csrf) -> Self {
         self.csrf = Some(csrf);

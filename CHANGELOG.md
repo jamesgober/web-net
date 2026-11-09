@@ -13,6 +13,27 @@
 
 ---
 
+## [0.9.0] - 2026-11-10
+
+The beta: the pre-1.0 polish pass.
+
+### Fixed
+
+- `Sites` gave the upper-case spelling of a lower-case site's base path to
+  another site; the lower-case site now claims it and redirects it.
+
+### Documentation
+
+- `dev/READINESS-1.0.md`: what is done, what is not, and what 1.0 needs.
+- The CSRF step is always strict (origin policy and token); request bodies
+  are read buffered.
+
+### Verification
+
+- Both fuzz targets 24 hours on this code, no findings.
+
+---
+
 ## [0.8.0] - 2026-11-09
 
 The alpha: the API as it should freeze.
@@ -277,7 +298,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/jamesgober/web-net/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jamesgober/web-net/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamesgober/web-net/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamesgober/web-net/compare/v0.5.0...v0.6.0
