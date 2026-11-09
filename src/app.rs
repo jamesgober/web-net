@@ -981,9 +981,10 @@ impl<G: Gate> App<G> {
         };
         let rel = &c[rel_start..];
         let mut fixed: Option<String> = None;
+        let health = self.health.iter().any(|(p, _)| p.as_ref() == rel);
         if rel.is_empty() {
             fixed = Some("/".into());
-        } else if rel.len() > 1 {
+        } else if rel.len() > 1 && !health {
             match site.slash {
                 TrailingSlash::Strip => {
                     if let Some(s) = rel.strip_suffix('/') {
@@ -1103,6 +1104,10 @@ impl<G: Gate> App<G> {
         if let Some(outcome) = self.early(http, at, &path, reply) {
             return outcome;
         }
+        // CORS preflights carry no credentials: answered before the gate.
+        if let Some(outcome) = self.preflight(http, at, &path, reply) {
+            return outcome;
+        }
 
         let req = Request {
             http,
@@ -1131,20 +1136,13 @@ impl<G: Gate> App<G> {
             },
         };
 
-        let gate_cookie = if owned_here { who.set_cookie() } else { None };
-        let outcome = self.routed(
-            http,
-            env,
-            at,
-            req,
-            who,
-            gate_cookie.is_some(),
-            reply,
-            report,
-        );
+        let mut gate_cookie = if owned_here { who.set_cookie() } else { None };
+        let outcome = self.routed(http, env, at, req, who, &mut gate_cookie, reply, report);
         // The gate's own cookie (a dead session cleared, a pre-session id
-        // set) leaves on every exit after authentication, once. A caller
-        // that authenticated itself writes its own.
+        // set) leaves on every exit after authentication, once. A handler's
+        // reply wrote it already, before the handler's own fields (so a
+        // fresh session cookie set by the handler wins); every other exit
+        // writes it here. A caller that authenticated itself writes its own.
         if let Some(c) = gate_cookie {
             reply.header("set-cookie", c.as_bytes());
             report.cache = Cacheable::No;
@@ -1161,7 +1159,7 @@ impl<G: Gate> App<G> {
         at: At<'_>,
         mut req: Request<'r>,
         who: &G::Identity,
-        cookie_pending: bool,
+        gate_cookie: &mut Option<&str>,
         reply: &mut HttpReply,
         report: &mut Served,
     ) -> Outcome {
@@ -1176,42 +1174,6 @@ impl<G: Gate> App<G> {
         let endpoint = &self.endpoints[ep as usize];
         let Some(idx) = self.entry_for(ep as usize, method) else {
             if method == Method::Options {
-                if let (Some(origin), Some(wanted)) = (
-                    http.header("origin"),
-                    http.header("access-control-request-method"),
-                ) {
-                    let wanted = Method::from_bytes(wanted);
-                    let cors = self
-                        .entry_for(ep as usize, wanted)
-                        .and_then(|i| self.entries[i as usize].cors.as_ref());
-                    if let Some(cors) = cors {
-                        // Only the methods whose routes share this policy.
-                        let mut set = MethodSet::EMPTY;
-                        for m in endpoint.set.iter() {
-                            let shares = self.entry_for(ep as usize, m).is_some_and(|i| {
-                                self.entries[i as usize]
-                                    .cors
-                                    .as_ref()
-                                    .is_some_and(|c| Arc::ptr_eq(c, cors))
-                            });
-                            if shares {
-                                set = set.with(m);
-                            }
-                        }
-                        let ok = cors.preflight(
-                            origin,
-                            wanted,
-                            http.header("access-control-request-headers"),
-                            set,
-                            reply,
-                        );
-                        if !ok {
-                            self.event(EventKind::Refused, env, None, 204, "cors.denied", None);
-                        }
-                        self.secure(reply, at.tls, |_| false);
-                        return Outcome::Done;
-                    }
-                }
                 reply.status(204).header("allow", endpoint.allow.as_bytes());
                 self.secure(reply, at.tls, |_| false);
                 return Outcome::Done;
@@ -1311,7 +1273,7 @@ impl<G: Gate> App<G> {
             req,
             who,
             caps,
-            (cookie_pending, binding),
+            (gate_cookie, binding),
             &mut out,
             reply,
             &mut report.cache,
@@ -1323,6 +1285,54 @@ impl<G: Gate> App<G> {
             SCRATCH.with(|s| s.set(Some(out)));
         }
         outcome
+    }
+
+    /// A CORS preflight for a route with a policy: answered before the gate.
+    fn preflight(
+        &self,
+        http: &HttpRequest<'_>,
+        at: At<'_>,
+        path: &str,
+        reply: &mut HttpReply,
+    ) -> Option<Outcome> {
+        if http.method() != Method::Options {
+            return None;
+        }
+        let origin = http.header("origin")?;
+        let wanted = Method::from_bytes(http.header("access-control-request-method")?);
+        let (ep, _) = self.trie.find(path)?;
+        let ep = ep as usize;
+        if self.entry_for(ep, Method::Options).is_some() {
+            return None;
+        }
+        let cors = self
+            .entry_for(ep, wanted)
+            .and_then(|i| self.entries[i as usize].cors.as_ref())?;
+        // Only the methods whose routes share this policy.
+        let mut set = MethodSet::EMPTY;
+        for m in self.endpoints[ep].set.iter() {
+            let shares = self.entry_for(ep, m).is_some_and(|i| {
+                self.entries[i as usize]
+                    .cors
+                    .as_ref()
+                    .is_some_and(|c| Arc::ptr_eq(c, cors))
+            });
+            if shares {
+                set = set.with(m);
+            }
+        }
+        let ok = cors.preflight(
+            origin,
+            wanted,
+            http.header("access-control-request-headers"),
+            set,
+            reply,
+        );
+        if !ok {
+            self.event(EventKind::Refused, at.env, None, 204, "cors.denied", None);
+        }
+        self.secure(reply, at.tls, |_| false);
+        Some(Outcome::Done)
     }
 
     /// Health paths and static files.
@@ -1358,10 +1368,11 @@ impl<G: Gate> App<G> {
             return Some(Outcome::Done);
         }
         let found = assets::find(assets, rel, http.header("accept-encoding"));
-        if found.is_none() && reply.stream().sent() > 0 {
-            // The file went away between parts: end the reply, which has
-            // already started.
-            return Some(Outcome::Close);
+        let key = (at.env.connection().get(), at.env.seq().get());
+        if let Some(tag) = assets::continuing(key) {
+            // A later part of a large file: the same file, or the end of
+            // the connection; never another reply inside this one.
+            return Some(assets::next_part(key, &tag, found.as_ref(), http, reply));
         }
         let Some(found) = found else {
             self.refuse(
@@ -1375,7 +1386,7 @@ impl<G: Gate> App<G> {
             );
             return Some(Outcome::Done);
         };
-        let Some(outcome) = assets::serve(assets, &found, http, reply) else {
+        let Some(outcome) = assets::serve(assets, &found, key, http, reply) else {
             self.refuse(
                 500,
                 "assets.unreadable",
@@ -1416,7 +1427,7 @@ impl<G: Gate> App<G> {
         req: Request<'_>,
         who: &G::Identity,
         caps: Captures,
-        (cookie_pending, binding): (bool, Option<&[u8]>),
+        (gate_cookie, binding): (&mut Option<&str>, Option<&[u8]>),
         out: &mut Out,
         reply: &mut HttpReply,
         cacheable: &mut Cacheable,
@@ -1456,19 +1467,28 @@ impl<G: Gate> App<G> {
         };
         match result {
             Ok(Ok(())) if !out.invalid => {
-                // A reply that sets a cookie is never public: a shared cache
-                // would give one visitor's cookie to every guest.
-                let cookies = cookie_pending || out.has("set-cookie");
+                // A handler that sets the gate's cookie itself (a new session
+                // after sign-in) replaces it: the gate's is not sent.
+                if gate_cookie.is_some_and(|c| out.sets_cookie(c)) {
+                    *gate_cookie = None;
+                }
+                // A reply that sets a cookie is never public, whatever the
+                // policy or the handler said: a shared cache would give one
+                // visitor's cookie (a pre-session id, the CSRF binding) to
+                // every guest.
+                let cookies = gate_cookie.is_some() || out.has("set-cookie");
                 let ours = !out.has("cache-control");
-                if ours {
+                if cookies {
+                    let public = out
+                        .get("cache-control")
+                        .is_some_and(|v| v.windows(6).any(|w| w.eq_ignore_ascii_case(b"public")));
+                    if ours || public {
+                        out.remove("cache-control");
+                        out.header("cache-control", b"private, no-store");
+                    }
+                } else if ours {
                     let (for_guest, for_member) = &entry.cache_values;
-                    let value = if cookies && !matches!(entry.cache, CachePolicy::Unset) {
-                        Some("private, no-store")
-                    } else if guest {
-                        for_guest.as_deref()
-                    } else {
-                        for_member.as_deref()
-                    };
+                    let value = if guest { for_guest } else { for_member };
                     if let Some(v) = value {
                         out.header("cache-control", v.as_bytes());
                     }
@@ -1493,6 +1513,9 @@ impl<G: Gate> App<G> {
                     _ => Cacheable::No,
                 };
                 reply.status(out.status);
+                if let Some(c) = gate_cookie.take() {
+                    reply.header("set-cookie", c.as_bytes());
+                }
                 for &(ns, ne, vs, ve) in &out.spans {
                     let name = core::str::from_utf8(&out.names[ns as usize..ne as usize])
                         .unwrap_or("x-invalid");

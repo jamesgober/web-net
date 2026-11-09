@@ -139,14 +139,15 @@ pub(crate) fn check(
                 &TOKEN_POLICY,
                 &mut (&mut check, StopAtFile),
             );
+            // The specific refusals first: a second token is refused even
+            // after a first one verified.
             match scanned {
+                Err(e) if e.code().starts_with("csrf.") => Err(e.code()),
+                Err(e) if e.code() == "policy.duplicate_token" => Err("csrf.duplicate"),
+                Err(e) if e.code() == "policy.token_field_late" => Err("csrf.missing"),
                 _ if check.verified() => Ok(()),
                 Ok(_) => Err("csrf.missing"),
-                Err(e) if e.code().starts_with("csrf.") => Err(e.code()),
                 Err(e) if e.code() == SCAN_DONE => Err("csrf.missing"),
-                // form-net's own token placement rules.
-                Err(e) if e.code() == "policy.token_field_late" => Err("csrf.missing"),
-                Err(e) if e.code() == "policy.duplicate_token" => Err("csrf.duplicate"),
                 Err(_) => Err("csrf.unreadable_form"),
             }
         }

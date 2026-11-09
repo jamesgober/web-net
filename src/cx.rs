@@ -83,6 +83,25 @@ impl Out {
             .map(|&(_, _, vs, ve)| &self.values[vs as usize..ve as usize])
     }
 
+    /// Drops every field called `name`.
+    pub(crate) fn remove(&mut self, name: &str) {
+        let names = &self.names;
+        self.spans
+            .retain(|&(s, e, _, _)| &names[s as usize..e as usize] != name.as_bytes());
+    }
+
+    /// Whether a `Set-Cookie` field sets the cookie `cookie` (by name).
+    pub(crate) fn sets_cookie(&self, cookie: &str) -> bool {
+        let name = cookie.split('=').next().unwrap_or("").trim();
+        self.spans.iter().any(|&(s, e, vs, ve)| {
+            &self.names[s as usize..e as usize] == b"set-cookie"
+                && self.values[vs as usize..ve as usize]
+                    .split(|&b| b == b'=')
+                    .next()
+                    .is_some_and(|n| n.trim_ascii() == name.as_bytes())
+        })
+    }
+
     pub(crate) fn has(&self, name: &str) -> bool {
         self.spans
             .iter()

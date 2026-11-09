@@ -232,7 +232,8 @@ pub trait View {
 - `Assets::new(mount, dir)`, added with `Builder::assets`. Served in the early step, before the gate and the router: files are public. A route under a mount stops the build (it could never run).
 - The path is canonical already (section 4). Each decoded segment is checked again for what file systems read specially, on every platform so a site behaves the same everywhere: a leading dot (`.env`, `.git`; `hidden_files(true)` allows them), `:` (Windows alternate data streams and drive letters), a trailing dot or space (Windows drops them, so `secret.txt.` would open `secret.txt`), `\`, NUL, and the Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, with any extension). Any of them is a 404.
 - The joined path is resolved (`canonicalize`) and must still be under the resolved root, so a symbolic link cannot lead out of the folder, and every resolved name below the root passes the same segment rules: a Windows 8.3 short name (`ENVSEC~1` for `.envsecret`) or a link inside the folder cannot reach a name the request could not spell. Links that stay inside work. The window between the check and the open is only reachable by someone who can write into the folder.
-- The file is read (or, for a large one, opened) before any field is written; one that cannot be read is a clean 500. A file that disappears between the parts of a large reply ends the connection.
+- The file is read (or, for a large one, opened) before any field is written; one that cannot be read is a clean 500.
+- A large reply in parts remembers its file's entity tag (per worker thread, keyed by connection and request number, at most 256 at once; a reply in parts never leaves its worker). A later part whose file changed or went away ends the connection abortively, so the client sees a cut-short body, never a clean end with other bytes.
 - A folder is a 404 unless the mount has an `index` file. There are never listings.
 - Validators: a strong `ETag` from the length, the modification time (nanoseconds), and the coding; `Last-Modified`. `If-None-Match` (weak comparison) answers 304; without it, `If-Modified-Since` does. Malformed conditions are ignored, as RFC 9110 says.
 - Ranges (`GET` only): one range is a 206 with `Content-Range`; an unsatisfiable one a 416 with `bytes */length`; several ranges, or an `If-Range` that does not match, get the whole file (RFC 9110 lets a server ignore `Range`). `Accept-Ranges: bytes`.
@@ -292,7 +293,7 @@ Cost [est., csrf-sec's own measurements]: about 110 ns to verify a token and abo
 | `Public { max_age }` | `public, max-age=N` | `public, max-age=N` |
 | `Guests { max_age }` | `public, max-age=N` | `private, no-store` |
 
-A reply that sets a cookie (the handler's, or the gate's through `Identity::set_cookie`) gets `private, no-store` under any policy but `Unset`: a shared cache must never hand one visitor's cookie to the next.
+A reply that sets a cookie (the handler's, or the gate's through `Identity::set_cookie`) gets `private, no-store` under every policy, `Unset` included, and replaces a `Cache-Control` the handler set when that one says `public`: a shared cache must never hand one visitor's cookie (a pre-session id is the CSRF binding) to the next. The gate's cookie goes before the handler's fields, and is dropped when the handler sets a cookie of the same name (a new session after sign-in), so it never cancels it. With `respond_identified` the caller writes its own cookies after web-net, so it must not keep a reply it adds a cookie to.
 
 `App::serve(req, env, who, reply) -> Served { outcome, route, cache }` tells a cache in front of web-net whether it may keep the reply for guests: `Cacheable::Guests { max_age }` only when the policy is `Guests` or `Public`, web-net set the `Cache-Control` itself (the handler did not), the route has no CORS policy, the request was a guest's `GET` or `HEAD`, the status is 200, no cookie is set, and the reply varies on nothing but `Accept-Encoding`. Everything else is `Cacheable::No`. The cache keys and invalidates on its own terms; web-net only says what is safe to keep.
 
@@ -414,6 +415,7 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | O-2 | Handlers synchronous? | yes; slow work is declared with `.work()` and moved by a dispatcher in front (answered at 0.2) |
 | O-4 | Ask serve-net for a reply body buffer handed out (or a reply reset) so the held reply's copy can go | yes, for serve-net 0.8 or 0.9 |
 | O-5 | Redirect status for a non-canonical `GET`: 301 or 308 | 301 (universally cached and understood); 308 for unsafe methods |
+| O-7 | Ask serve-net for an explicit abort of a reply in parts (today web-net returns `Deferred` without deferring, which serve-net answers with an abortive close once the head has left) | yes, for serve-net 0.8 or 0.9 |
 | O-6 | Should 405 and automatic `OPTIONS` answer before authorization (revealing a route's methods to anyone)? | yes, as now: CORS preflights carry no credentials, and the methods of a route are not a secret; a route that must stay hidden uses `Denial::hidden` and its own `OPTIONS` |
 
 ---
@@ -471,4 +473,9 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-048 | 2026-11-09 | Resolved asset names below the root pass the segment rules again | 8.3 short names reached dot files on Windows |
 | D-049 | 2026-11-09 | An asset is read before any field is written; a vanished file mid-reply closes the connection | no 500 with a file's validators and cache lifetime, no error page inside a file |
 | D-050 | 2026-11-09 | With hosts declared, an empty or missing `Host` is a 421; under `TrailingSlash::Add` a file-like path loses its slash | one rule for every request; one spelling per path |
+| D-051 | 2026-11-09 | A reply in parts remembers its file's tag; a changed or vanished file mid-reply aborts the connection | a download must never complete cleanly with the wrong bytes; found by the second review |
+| D-052 | 2026-11-09 | The gate's cookie is written before the handler's fields and dropped when the handler sets the same cookie | a stale session's clear must not cancel the session the handler just created |
+| D-053 | 2026-11-09 | Any reply that sets a cookie is `private, no-store`, overriding even a handler's `public` | the pre-session id is the CSRF binding: a cached copy would hand one to every guest (login CSRF) |
+| D-054 | 2026-11-09 | Health paths keep their declared spelling under every trailing-slash policy | probes must reach them without following redirects |
+| D-055 | 2026-11-09 | CORS preflights are answered before authentication | preflights carry no credentials; a gate refusing anonymous requests must not break CORS (and they never get the gate's cookie) |
 | D-045 | 2026-11-08 | `Identity::set_cookie` and `Denial::with_cookie`: a cookie the gate sets leaves on every exit of `respond`, once; `respond_identified` leaves it to its caller; such replies are never keepable by a cache | a gate clearing a dead session must reach the browser even when the request is refused, without two writers sending it twice |

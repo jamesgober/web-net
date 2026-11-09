@@ -34,6 +34,8 @@ Also defended, with tests elsewhere: personal pages in a shared cache (the `Gues
 
 0.7 had an independent adversarial review of `src/`. It found seven defects, all fixed with regression tests before the release: a multipart CSRF token checked after the handler had run (now before), `public` caching of a reply with a cookie, a cacheability report that missed the handler's own `Cache-Control` and CORS fields, Windows short names reaching dot files, a failed file read leaving a broken reply, a preflight listing methods without a policy, and an empty `Host` passing the host check. Its lower-confidence notes (superscript device names, `CON .txt`, `/style.css/` under `TrailingSlash::Add`) were fixed too. Recorded as PLAN D-046 to D-050.
 
+A second review, of the fixes and the code new in 0.7, found no CSRF bypass and four more defects, all fixed with regression tests (`tests/review.rs`): a large file changed between the parts of its reply could finish cleanly with the wrong bytes (now an abortive close); the gate's clearing cookie could cancel a session the handler had just set; a handler's own `public` cache header could go out beside a pre-session cookie (a login-CSRF vector through a shared cache); and health paths did not answer under `TrailingSlash::Add`. Preflights now run before the gate as the plan says. Recorded as PLAN D-051 to D-055.
+
 ## What web-net does not do
 
 - **Escaping.** Contextual escaping of values in pages is the template engine's job (`Render`). web-net's own pages contain fixed text and the reference only.

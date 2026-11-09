@@ -54,6 +54,21 @@ From an independent adversarial review:
 - `COM¹`, `LPT³`, `CON .txt` as asset names, and `/style.css/` under
   `TrailingSlash::Add`.
 
+From a second review:
+
+- A large file changed or removed between the parts of its reply could end
+  as if complete with the wrong bytes; the connection is now closed
+  abortively.
+- The gate's cookie (a stale session cleared) was written after the
+  handler's and could cancel a fresh sign-in; it now goes first, and is
+  dropped when the handler sets the same cookie.
+- A handler's `Cache-Control: public` could leave beside the gate's
+  pre-session cookie; any reply with a cookie is now `private, no-store`.
+- Health paths answer under `TrailingSlash::Add`.
+- CORS preflights are answered before authentication.
+- In the multipart CSRF scan, a second token is refused even after a first
+  one verified.
+
 ### Changed
 
 - `OPTIONS *` to a host the site does not serve is a 421.

@@ -10,6 +10,7 @@
 //! then resolved and must still be inside the folder, so a symbolic link
 //! cannot lead out of it.
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -26,6 +27,102 @@ pub const INLINE_LIMIT: u64 = 1 << 20;
 
 /// The size of one part of a file sent in parts.
 const PART: usize = 64 << 10;
+
+/// How a reply in parts that cannot finish ends: serve-net answers a
+/// `Deferred` without `reply.defer()` with a refusal, and a refusal once
+/// the head has left closes the connection abortively, so the client sees
+/// a cut-short body and never a clean end with the wrong bytes.
+/// (`Outcome::Close` would end the chunked body cleanly.) serve-net is
+/// asked for an explicit abort (PLAN O-7).
+const ABORT: Outcome = Outcome::Deferred;
+
+/// A request whose large file is going out in parts: its connection and
+/// request number.
+pub(crate) type StreamKey = (u64, u32);
+
+/// The most replies in parts one thread follows at once; past it the oldest
+/// is forgotten (and its next part closes its connection).
+const MAX_IN_FLIGHT: usize = 256;
+
+thread_local! {
+    /// The entity tag of each large file going out in parts on this thread.
+    /// A reply in parts stays on the worker that owns its connection, so
+    /// every part of it comes back to the same thread. A later part whose
+    /// file no longer has that tag ends the connection, never the reply.
+    static IN_FLIGHT: RefCell<Vec<(StreamKey, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn begin(key: StreamKey, tag: &str) {
+    IN_FLIGHT.with(|m| {
+        let mut m = m.borrow_mut();
+        m.retain(|(k, _)| *k != key);
+        if m.len() >= MAX_IN_FLIGHT {
+            m.remove(0);
+        }
+        m.push((key, tag.to_owned()));
+    });
+}
+
+fn end(key: StreamKey) {
+    IN_FLIGHT.with(|m| m.borrow_mut().retain(|(k, _)| *k != key));
+}
+
+/// The entity tag of the file this request is sending in parts, if a part
+/// of it has gone out already.
+pub(crate) fn continuing(key: StreamKey) -> Option<String> {
+    IN_FLIGHT.with(|m| {
+        m.borrow()
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, t)| t.clone())
+    })
+}
+
+/// The next part of a reply in parts. `found` is the file resolved again
+/// for this part, `None` when it is gone; a file that changed (another tag)
+/// or went away ends the connection.
+pub(crate) fn next_part(
+    key: StreamKey,
+    tag: &str,
+    found: Option<&Found>,
+    req: &HttpRequest<'_>,
+    reply: &mut HttpReply,
+) -> Outcome {
+    let Some(found) = found.filter(|f| etag(f) == tag) else {
+        end(key);
+        return ABORT;
+    };
+    let (start, len) = match req.header("range").map(|v| {
+        let mut out = [ByteRange { start: 0, end: 0 }];
+        (parse_net::byte_ranges(v, found.len, &mut out), out[0])
+    }) {
+        Some((Ok(RangeOutcome::Ranges(1)), r)) if if_range_holds(found, tag, req) => {
+            (r.start, r.end - r.start + 1)
+        }
+        _ => (0, found.len),
+    };
+    let sent = reply.stream().sent();
+    let outcome = send_part(found, start, len, sent, reply);
+    if outcome != Outcome::More {
+        end(key);
+    }
+    outcome
+}
+
+/// Whether the request's `If-Range` (if any) holds for the file: the same
+/// test the first part made.
+fn if_range_holds(found: &Found, tag: &str, req: &HttpRequest<'_>) -> bool {
+    let Some(v) = req.header("if-range") else {
+        return true;
+    };
+    let current = EntityTag::strong(&tag.as_bytes()[1..tag.len() - 1]).ok();
+    let modified = found
+        .modified
+        .and_then(|m| HttpDate::from_system_time(m).ok());
+    parse_net::range::parse_if_range(v)
+        .map(|ir| ir.matches(current.as_ref(), modified))
+        .unwrap_or(false)
+}
 
 /// A folder served under a mount path.
 ///
@@ -252,6 +349,7 @@ fn etag(found: &Found) -> String {
 pub(crate) fn serve(
     assets: &Assets,
     found: &Found,
+    key: StreamKey,
     req: &HttpRequest<'_>,
     reply: &mut HttpReply,
 ) -> Option<Outcome> {
@@ -295,12 +393,7 @@ pub(crate) fn serve(
     let mut range: Option<ByteRange> = None;
     if req.method() == Method::Get {
         if let Some(value) = req.header("range") {
-            let if_range_ok = match req.header("if-range") {
-                None => true,
-                Some(v) => parse_net::range::parse_if_range(v)
-                    .map(|ir| ir.matches(current.as_ref(), last_modified))
-                    .unwrap_or(false),
-            };
+            let if_range_ok = if_range_holds(found, &tag, req);
             if if_range_ok {
                 let mut out = [ByteRange { start: 0, end: 0 }];
                 match parse_net::byte_ranges(value, found.len, &mut out) {
@@ -353,8 +446,12 @@ pub(crate) fn serve(
     // Sent in parts: serve-net calls again for each part, with the same
     // request; `sent` says where the next part starts. The status and fields
     // set above leave with the first part only.
-    let sent = reply.stream().sent();
-    Some(send_part(found, start, len, sent, reply))
+    begin(key, &tag);
+    let outcome = send_part(found, start, len, 0, reply);
+    if outcome != Outcome::More {
+        end(key);
+    }
+    Some(outcome)
 }
 
 fn send_part(found: &Found, start: u64, len: u64, sent: u64, reply: &mut HttpReply) -> Outcome {
@@ -363,11 +460,11 @@ fn send_part(found: &Found, start: u64, len: u64, sent: u64, reply: &mut HttpRep
     }
     let want = (len - sent).min(PART as u64) as usize;
     let Some(bytes) = read_at(&found.path, start + sent, want) else {
-        return Outcome::Close;
+        return ABORT;
     };
     if bytes.len() != want {
         // Shorter than its length now: the file changed under the reply.
-        return Outcome::Close;
+        return ABORT;
     }
     reply.stream().send(&bytes);
     if sent + want as u64 >= len {
