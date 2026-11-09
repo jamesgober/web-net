@@ -1,6 +1,6 @@
 # web-net - API Reference
 
-> Every public item in `web-net`, with examples. Version `0.3.0`.
+> Every public item in `web-net`, with examples. Version `0.4.0`.
 > Design and reasons: [`../dev/PLAN.md`](../dev/PLAN.md).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
@@ -18,6 +18,7 @@
 - [Errors](#errors)
 - [Static files and health](#static-files-and-health)
 - [Security headers](#security-headers)
+- [Forms, uploads, CSRF](#forms-uploads-csrf)
 - [Events and checkpoints](#events-and-checkpoints)
 - [URL rules](#url-rules)
 - [Constants](#constants)
@@ -87,6 +88,8 @@ impl<G: Gate> serve_net::HttpService for App<G>;
 | `health(&str)` | a liveness path (`200 ok`) |
 | `ready(&str, Fn() -> bool)` | a readiness path (`200 ready` / `503 not ready`) |
 | `security_headers(SecurityHeaders)` | the security headers on every reply |
+| `csrf(csrf_sec::Csrf)` | CSRF protection (required when a route takes an unsafe method and is not exempt) |
+| `redirect_hosts(&[&str])` | hosts `Cx::redirect_external` may send to |
 | `build()` | `Result<App<G>, BuildError>` with every problem listed |
 
 ## Routes and groups
@@ -102,6 +105,8 @@ impl<I, R> Route<I, R> {
     pub fn name(self, name: &'static str) -> Self;
     pub fn work(self, work: WorkClass) -> Self;
     pub fn template(self, name: &'static str) -> Self;
+    pub fn csrf_exempt(self, reason: &'static str) -> Self;
+    pub fn form_limits(self, limits: form_net::Limits) -> Self;
 }
 impl<I, R> Group<I, R> {
     pub fn new(prefix: impl Into<String>) -> Self;
@@ -143,7 +148,12 @@ Named functions (`fn account(cx: &mut Cx<'_, User>) -> web_net::Result`) need no
 | `param(name) -> Option<Cow<str>>` | a route parameter, decoded |
 | `param_as::<T>(name) -> Result<T>` | parsed; 404 `route.param` when it does not parse |
 | `query(name) -> Result<Option<Cow<str>>>` | decoded; 400 `query.duplicate` for a repeated name |
-| `body() -> Result<&[u8]>` | the body |
+| `body() -> Result<&[u8]>` | the raw body; 403 for a multipart body whose CSRF token is unchecked |
+| `form::<T>() -> Result<T, FormError>` | a typed form, the token checked in the same pass |
+| `form_inspected::<T, N>(&mut N)` | the same with an inspector |
+| `upload(&Store) -> Result<Upload, FormError>` | an upload (feature `uploads`); `upload_inspected` |
+| `csrf_token() -> Result<String>` | a token for the visitor's binding |
+| `precondition(tag, modified) -> Result` | 412 when `If-Match` or `If-Unmodified-Since` is false |
 
 | Write | |
 |---|---|
@@ -153,6 +163,7 @@ Named functions (`fn account(cx: &mut Cx<'_, User>) -> web_net::Result`) need no
 | `url(path) -> String` | the base path in front |
 | `see_other(path) -> Result` | 303 to a site-relative path |
 | `redirect(status, path) -> Result` | 301, 302, 303, 307, 308 to a site-relative path |
+| `redirect_external(status, url) -> Result` | to a host from `redirect_hosts` only |
 | `render(&dyn View) -> Result` | the route's template |
 | `render_named(name, &dyn View) -> Result` | a template by name |
 | `set_cookie(&cookie_net::SetCookie)` | a `Set-Cookie` field |
@@ -299,6 +310,36 @@ impl Default for SecurityHeaders;   // the strict defaults in PLAN section 12.2
 pub const DEFAULT_CSP: &str;
 ```
 
+## Forms, uploads, CSRF
+
+```rust
+use web_net::form_net::{self, FromForm};
+use web_net::{App, Cx, csrf_sec::Csrf, post};
+# struct Visitor; impl web_net::Identity for Visitor { fn is_guest(&self) -> bool { false } fn csrf_binding(&self) -> Option<&[u8]> { Some(b"session-id") } }
+# struct G; impl web_net::Gate for G { type Identity = Visitor; type Rule = ();
+#   fn authenticate(&self, _: &web_net::Request<'_>) -> Result<Visitor, web_net::Denial> { Ok(Visitor) }
+#   fn authorize(&self, _: &Visitor, _: &(), _: &web_net::Request<'_>) -> Result<(), web_net::Denial> { Ok(()) } }
+
+form_net::form! {
+    pub struct Email { pub email: String }
+    ignore = ["csrf_token"];
+}
+
+let app = App::with_gate(G)
+    .csrf(Csrf::new(*b"a persisted 32-byte secret key!!").unwrap())
+    .route(post("/account/email", |cx: &mut Cx<'_, Visitor>| {
+        match cx.form::<Email>() {
+            Ok(form) => { let _ = form.email; cx.see_other("/account") }
+            Err(e) if e.status_hint() == 422 => { cx.html(422, "<p>check the form</p>"); Ok(()) }
+            Err(e) => Err(e.into()),
+        }
+    }).public())
+    .build()?;
+# Ok::<(), web_net::BuildError>(())
+```
+
+The rules (binding, origin policy, where the token may come from, what is refused): PLAN section 12.3. Codes: `csrf.no_binding`, `csrf.missing`, `csrf.duplicate`, `csrf.unverified`, `csrf.unreadable_form`, `csrf.no_engine`, and csrf-sec's reasons as `csrf.<reason>` (`csrf.bad_mac`, `csrf.cross_site`, ...).
+
 ## Events and checkpoints
 
 ```rust
@@ -326,4 +367,4 @@ Codes web-net reports: `url.not_absolute`, `url.bad_escape`, `url.encoded_slash`
 - `DEFAULT_PAGE_LIMIT: usize = 8 MiB`: the default page budget.
 - `INLINE_LIMIT: u64 = 1 MiB`: files up to this size are read whole.
 - `DEFAULT_CSP: &str`: the default content security policy.
-- `cookie_net`: the cookie-net crate, re-exported.
+- `cookie_net`, `csrf_sec`, `form_net`: the crates, re-exported.

@@ -13,6 +13,37 @@
 
 ---
 
+## [0.4.0] - 2026-11-08
+
+Actions: forms, uploads, and CSRF.
+
+### Added
+
+- CSRF on every unsafe method (`POST`, `PUT`, `PATCH`, `DELETE`) through
+  csrf-sec: `Builder::csrf(Csrf)`; the identity's `csrf_binding`; the origin
+  policy; a token from `X-CSRF-Token` or the `csrf_token` form field
+  (urlencoded checked before the handler, multipart in the form pass, the raw
+  body locked until then). `Route::csrf_exempt(reason)`. `Cx::csrf_token`.
+- `Cx::form`, `Cx::form_inspected` (form-net typed forms with the route's
+  limits), `Cx::upload` and `Cx::upload_inspected` (feature `uploads`),
+  `Route::form_limits`. `From<form_net::FormError> for Error`.
+- `Builder::redirect_hosts` and `Cx::redirect_external`.
+- `Cx::precondition` (`If-Match`, `If-Unmodified-Since`, 412).
+- Re-exports `web_net::form_net` and `web_net::csrf_sec`.
+- Feature `uploads`.
+
+### Changed
+
+- An application with a route that takes an unsafe method now needs
+  `Builder::csrf(..)`, or the route needs `csrf_exempt(reason)`; the build
+  says which. `Cx::body` refuses an unverified multipart body.
+
+### Dependencies
+
+- form-net 0.9 and csrf-sec 0.9.3 added.
+
+---
+
 ## [0.3.0] - 2026-11-08
 
 Static files and the finish step.
@@ -110,7 +141,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jamesgober/web-net/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/web-net/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/web-net/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/web-net/releases/tag/v0.1.0

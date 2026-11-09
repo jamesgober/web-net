@@ -42,7 +42,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(())
                 })
                 .post(|cx| cx.see_other("/"))
-                .public(),
+                .public()
+                // A form that changes state gets Builder::csrf(..) and a gate
+                // whose identities carry a CSRF binding instead.
+                .csrf_exempt("demo: the POST changes nothing"),
         )
         .build()?;
 

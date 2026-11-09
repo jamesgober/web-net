@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "web-net"
-version = "0.3.0"
+version = "0.4.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -45,6 +45,8 @@ path = "src/lib.rs"
 # #################################
 [features]
 default = []
+# Uploads: Cx::upload and form-net's Store (private temporary files).
+uploads = ["form-net/fs"]
 
 
 # DEPENDENCIES
@@ -57,6 +59,10 @@ serve-net = { version = "0.7.1", default-features = false, features = ["http1"] 
 cookie-net = { version = "0.7.1", default-features = false, features = ["std"] }
 # parse-net: entity tags, HTTP dates, ranges, and content negotiation.
 parse-net = { version = "0.9.2", default-features = false, features = ["std"] }
+# form-net: urlencoded and multipart forms, typed extraction, uploads.
+form-net = { version = "0.9", default-features = false, features = ["std"] }
+# csrf-sec: session-bound tokens and the origin policy.
+csrf-sec = { version = "0.9.3", default-features = false, features = ["std"] }
 
 
 # DEV DEPENDENCIES

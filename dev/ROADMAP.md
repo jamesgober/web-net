@@ -31,13 +31,14 @@ Exit: a site serves its assets and pages with correct caching and security heade
 - [x] parse-net for `If-None-Match`, `If-Modified-Since`, `Range`, `If-Range`, `Accept-Encoding`.
 - Moved to 0.4: `412 Precondition Failed` for `If-Match` and `If-Unmodified-Since` on unsafe methods. Reason: they protect state-changing requests, which arrive with the 0.4 actions; static files take `GET` and `HEAD` only.
 
-## v0.4.0 - Actions: forms, uploads, CSRF
+## v0.4.0 - Actions: forms, uploads, CSRF (DONE, 2026-11-08)
 Exit: a login form and an avatar upload run as form-net's alpha routes describe (`form-net/tests/alpha_routes.rs`), CSRF enforced.
-- [ ] form-net: `Cx::form::<T>()`, uploads, per-route limits, inspectors.
-- [ ] csrf-sec: origin policy and session-bound token on unsafe methods; opt-out only with a reason; the body is unreadable before the check passes.
-- [ ] Actions: 303 after an accepted form, 422 re-render with errors.
-- [ ] External redirect allowlist.
-- [ ] `If-Match` / `If-Unmodified-Since` on unsafe methods (412), moved from 0.3.
+- [x] form-net: `Cx::form::<T>()`, `form_inspected`, `Cx::upload` (feature `uploads`), per-route limits, inspectors.
+- [x] csrf-sec: origin policy and session-bound token on unsafe methods; opt-out only with a reason; the body is unreadable before the check passes.
+- [x] Actions: 303 after an accepted form, 422 re-render with errors.
+- [x] External redirect allowlist.
+- [x] `If-Match` / `If-Unmodified-Since` on unsafe methods (412), moved from 0.3.
+- The alpha routes' customs inspector is a test double here (`tests/actions.rs`), as in form-net: the real content inspector plugs into `form_inspected` when it exists. Running both routes for two weeks on a real site is form-net's and web-net's 0.8 alpha exit.
 
 ## v0.5.0 - Negotiation, CORS, compression, caching, several sites
 - [ ] `Accept` for error replies (HTML or JSON); `Accept-Language` locale.

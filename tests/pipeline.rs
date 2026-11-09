@@ -42,7 +42,8 @@ fn hello() -> App {
                     Ok(())
                 })
                 .post(|cx| cx.see_other("/form/done"))
-                .public(),
+                .public()
+                .csrf_exempt("pipeline tests have no sessions; CSRF is tested in tests/actions.rs"),
         )
         .route(
             get("/users/:id", |cx| {
@@ -381,7 +382,11 @@ fn gated(log: &'static Log) -> App<Demo> {
         })
         .allow(Rule::SignedIn),
     )
-    .route(post("/account", |cx| cx.see_other("/account")).allow(Rule::SignedIn))
+    .route(
+        post("/account", |cx| cx.see_other("/account"))
+            .allow(Rule::SignedIn)
+            .csrf_exempt("gate tests; CSRF is tested in tests/actions.rs"),
+    )
     .group(
         Group::new("/admin")
             .allow(Rule::Admin)
