@@ -3,7 +3,7 @@
     <br>
     <b>web-net</b>
     <br>
-    <sub><sup>THE WEB FRAMEWORK</sup></sub>
+    <sub><sup>THE WEB LAYER</sup></sub>
 </h1>
 
 <div align="center">
@@ -18,29 +18,81 @@
 
 <div align="left">
     <p>
-        <strong>web-net</strong> is what a site is written in: routes, handlers, middleware, and the small pieces every site needs. It runs inside serve-net and never sees a socket, a listener, or which front end the request came through.
+        <strong>web-net</strong> is the web layer on serve-net: what a site is written in. It takes a request from the server, decides which site and route it is for, checks who is asking and whether they may, runs the handler, renders the page, and answers every refusal and error the same way. It never sees a socket, a listener, or which front end the request came through.
     </p>
     <p>
-        Security is part of the shape of the API, not an add-on: every route declares its contract (customs-sec) and its permission (gate-sec), the service refuses to start if one is missing, loading a resource and checking access to it are one step, and every middleware boundary is a connection-gate checkpoint.
+        Security is part of the shape of the API: every route declares its access or the application does not build, a handler only ever receives a request that passed its gate, two spellings of a path can never reach different routes, and a failed handler never sends half a reply.
     </p>
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>.
+        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party runtime dependencies.
     </p>
     <blockquote>
-        <strong>Status: scaffold (<code>0.1.0</code>).</strong> No functional code yet. The design is written down in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a> and the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>; the public API is locked in <code>0.2.0</code>.
+        <strong>Status: <code>0.2.0</code>, core.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
     </blockquote>
 </div>
 
 <hr>
 <br>
 
-## Scope
+## Quick start
 
-Router (static, parameter, and wildcard segments, compiled at startup), handlers and typed extractors, middleware with bouncer checkpoints between stages, route declarations for customs-sec and gate-sec, cookies and forms through cookie-net and form-net, static files (ETag, ranges, cache headers), MIME types and content negotiation, CORS, security headers, CSRF, error pages, health endpoints, and a render trait so the template engine can be swapped.
+```toml
+[dependencies]
+web-net = "0.2"
+serve-net = "0.7"
+```
 
-See [`dev/PLAN.md`](./dev/PLAN.md) for the full scope, what is deliberately left to other crates, and the decision log.
+```rust
+use web_net::{App, Route, get};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let app = App::builder()
+        .host("example.com")
+        .alias("www.example.com")
+        .base("/blog")
+        .route(get("/", |cx| { cx.html(200, "<h1>Blog</h1>"); Ok(()) }).public())
+        .route(get("/posts/:slug", |cx| {
+            let slug = cx.param("slug").unwrap_or_default();
+            cx.text(200, &slug);
+            Ok(())
+        }).public())
+        .route(Route::at("/contact")
+            .get(|cx| { cx.html(200, "<form method=post></form>"); Ok(()) })
+            .post(|cx| cx.see_other("/"))
+            .public())
+        .build()?;
+
+    serve_net::Server::builder()
+        .listener(serve_net::ListenerSpec::tcp("web", "127.0.0.1:8080"))
+        .serve(app)?
+        .wait();
+    Ok(())
+}
+```
+
+## The request path
+
+| Step | What happens | Answers |
+|---|---|---|
+| site | the host picks the site; the base path is removed | 421 unknown host; 301 alias or HTTPS |
+| url | decoded once, one canonical spelling, dot and empty segments removed | 400 refused; 301/308 to the canonical path |
+| authenticate | the gate says who is asking | the gate's denial |
+| route | a trie compiled at build | 404 |
+| method | `HEAD` from `GET`, `OPTIONS` automatic | 405 with `Allow`, 501 |
+| authorize | the route's rule, unless it is public | 303 to sign-in, 401, 403, 404 |
+| hooks, handler | only the hooks registered for the route | the handler's error |
+| render | the engine reads a typed view; no JSON | 500 |
+| errors | one function: the engine's error template or a built-in page | |
+
+## Plugging in
+
+- **Authentication and authorization**: implement `Gate` (`authenticate`, `authorize`) and `Identity`. `App::with_gate(gate)`. A front layer that authenticates on its own calls `App::respond_identified`.
+- **Templates**: implement `Render` and read values through `View`. Engines live in their own crates; web-net depends on none.
+- **Detection and logs**: implement `Events` (every refusal, denial, failure, panic) and `Checkpoint` (in-flight revocation).
+
+Coming next (see the roadmap): static files, health, security headers and cookies out (0.3); forms, uploads, and CSRF through form-net and csrf-sec (0.4); negotiation, CORS, compression, caching, and several sites (0.5).
 
 <hr>
 <br>
@@ -55,8 +107,8 @@ See <a href="./dev/DIRECTIVES.md"><code>dev/DIRECTIVES.md</code></a> for enginee
     <h2>License</h2>
     <p>Licensed under either of</p>
     <ul>
-        <li><b>Apache License, Version 2.0</b> &mdash; <a href="./LICENSE-APACHE">LICENSE-APACHE</a></li>
-        <li><b>MIT License</b> &mdash; <a href="./LICENSE-MIT">LICENSE-MIT</a></li>
+        <li><b>Apache License, Version 2.0</b> - <a href="./LICENSE-APACHE">LICENSE-APACHE</a></li>
+        <li><b>MIT License</b> - <a href="./LICENSE-MIT">LICENSE-MIT</a></li>
     </ul>
     <p>at your option.</p>
 </div>

@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "web-net"
-version = "0.1.0"
+version = "0.2.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -16,7 +16,7 @@ license = "Apache-2.0 OR MIT"
 readme = "README.md"
 
 # Description
-description = "Web framework for Rust on serve-net: router, handlers, middleware with gate checkpoints, typed extractors, static files, CORS and security headers, error pages, health endpoints, and a render hand-off."
+description = "Web layer on serve-net: URL normalization, sites and base paths, a compiled router with 404 and 405, gate checkpoints for authentication and authorization, hooks, error pages, and a render trait that reads typed views."
 
 # Keywords (5 max)
 keywords = ["web", "framework", "router", "http", "server"]
@@ -50,8 +50,11 @@ default = []
 # DEPENDENCIES
 # #################################
 [dependencies]
-# None yet. Planned dependencies and the reason for each are listed in
-# dev/PLAN.md; each is added with the first code that needs it.
+# First-party crates at published versions only (dev/DIRECTIVES.md section 2).
+# serve-net: the server web-net runs in; HttpService, HttpRequest, HttpReply.
+serve-net = { version = "0.7.1", default-features = false, features = ["http1"] }
+# cookie-net: reading the Cookie field for gates (duplicates refused).
+cookie-net = { version = "0.7.1", default-features = false, features = ["std"] }
 
 
 # DEV DEPENDENCIES

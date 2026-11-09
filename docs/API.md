@@ -1,22 +1,273 @@
-# web-net &mdash; API Reference
+# web-net - API Reference
 
-> Complete reference for every public item in `web-net`, with examples.
-> **Status: scaffold (`0.1.0`).** The public API is written here at `0.2.0` (design lock); see [`../dev/ROADMAP.md`](../dev/ROADMAP.md) and the planned shape in [`../dev/PLAN.md`](../dev/PLAN.md).
+> Every public item in `web-net`, with examples. Version `0.2.0`.
+> Design and reasons: [`../dev/PLAN.md`](../dev/PLAN.md).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
 
 ## Table of contents
 
-- [`VERSION`](#version)
+- [Quick start](#quick-start)
+- [`App` and `Builder`](#app-and-builder)
+- [Routes and groups](#routes-and-groups)
+- [`Cx`: the handler context](#cx-the-handler-context)
+- [Gates](#gates)
+- [`Request`](#request)
+- [Hooks](#hooks)
+- [Rendering](#rendering)
+- [Errors](#errors)
+- [Events and checkpoints](#events-and-checkpoints)
+- [URL rules](#url-rules)
+- [Constants](#constants)
 
-## `VERSION`
+## Quick start
 
 ```rust
-pub const VERSION: &str;
+use web_net::{App, get};
+
+let app = App::builder()
+    .route(get("/", |cx| { cx.html(200, "<h1>Hello</h1>"); Ok(()) }).public())
+    .build()?;
+
+// On a server:
+// serve_net::Server::builder()
+//     .listener(serve_net::ListenerSpec::tcp("web", "127.0.0.1:8080"))
+//     .serve(app)?
+//     .wait();
+
+// In a test, no socket:
+let reply = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+assert_eq!(reply.status, 200);
+# Ok::<(), web_net::BuildError>(())
 ```
 
-The crate version, populated by Cargo at build time.
+## `App` and `Builder`
 
 ```rust
-println!("web-net {}", web_net::VERSION);
+pub struct App<G: Gate = Open>;
+impl App<Open> { pub fn builder() -> Builder<Open>; }
+impl<G: Gate> App<G> {
+    pub fn with_gate(gate: G) -> Builder<G>;
+    pub fn respond(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome;
+    pub fn respond_identified(&self, req: &HttpRequest<'_>, env: &Envelope, who: &G::Identity, reply: &mut HttpReply) -> Outcome;
+    pub fn classify(&self, head: &HttpHead<'_>) -> Classified;
+    pub fn gate(&self) -> &G;
+}
+impl<G: Gate> serve_net::HttpService for App<G>;
 ```
+
+- `respond` runs the whole pipeline, authentication included. `HttpService::call` is `respond`.
+- `respond_identified` takes the identity from a caller that authenticated already; authorization still runs per route.
+- `classify` (for a wrapper's `HttpService::head`) returns `Classified { route: Option<RouteId>, work: WorkClass }` without answering or calling the gate. A request that will be redirected or refused classifies as no route.
+
+`Builder<G>` methods (all return `Self` except `build`):
+
+| Method | Effect |
+|---|---|
+| `route(Route)` | adds a route |
+| `group(Group)` | adds a group's routes |
+| `hook(Hook, Routes, f)` | runs `f` at the hook for the selected routes |
+| `host(&str)` | a host the site answers; the first is canonical; none declared = any host |
+| `alias(&str)` | a host redirected to the canonical one |
+| `development()` | `localhost`, `127.0.0.1`, `[::1]`, `*.localhost` are the site; no HTTPS needed for them |
+| `base(&str)` | the folder the site is installed under (`/blog`) |
+| `trailing_slash(TrailingSlash)` | `Strip` (default), `Add`, `Ignore` |
+| `lowercase_paths()` | upper-case paths are redirected |
+| `https_only()` | plain HTTP redirected to HTTPS on the canonical host (needs a host) |
+| `sign_in(&str)` | the page a `Denial::sign_in` on `GET`/`HEAD` redirects to (303, with `next`) |
+| `challenge(&str)` | `WWW-Authenticate` for a 401 (default `Session`) |
+| `render(impl Render)` | the template engine |
+| `events(impl Events)` | where refusals, denials, and failures go |
+| `checkpoint(impl Checkpoint)` | in-flight revocation at web-net's stages |
+| `page_limit(usize)` | budget for one rendered page (default `DEFAULT_PAGE_LIMIT`, 8 MiB) |
+| `wipe_buffers()` | zero the reused reply buffers after every request |
+| `build()` | `Result<App<G>, BuildError>` with every problem listed |
+
+## Routes and groups
+
+```rust
+pub fn get<I, R, F>(pattern: impl Into<String>, f: F) -> Route<I, R>;  // also post, put, patch, delete
+impl<I, R> Route<I, R> {
+    pub fn at(pattern: impl Into<String>) -> Self;
+    pub fn on(self, method: Method, handler: impl Handler<I>) -> Self;
+    pub fn get(self, f) -> Self;   // also post, put, patch, delete
+    pub fn public(self) -> Self;
+    pub fn allow(self, rule: R) -> Self;
+    pub fn name(self, name: &'static str) -> Self;
+    pub fn work(self, work: WorkClass) -> Self;
+    pub fn template(self, name: &'static str) -> Self;
+}
+impl<I, R> Group<I, R> {
+    pub fn new(prefix: impl Into<String>) -> Self;
+    pub fn public(self) -> Self;
+    pub fn allow(self, rule: R) -> Self;
+    pub fn route(self, route: Route<I, R>) -> Self;
+    pub fn group(self, group: Group<I, R>) -> Self;
+}
+pub trait Handler<I>: Send + Sync + 'static { fn call(&self, cx: &mut Cx<'_, I>) -> Result; }
+```
+
+Patterns: `/users/:id/files/*rest`. Literals are written decoded (`/café`). At most `MAX_PARAMS` (8) parameters. A route needs `.public()` or `.allow(rule)` (from itself or its group).
+
+A closure that reads fields of a custom identity needs its parameter typed, because the closure is checked before the builder fixes the type:
+
+```rust
+# use web_net::{Cx, get, Route};
+# struct User { name: String }
+# impl web_net::Identity for User { fn is_guest(&self) -> bool { false } }
+# enum Rule { SignedIn }
+let account: Route<User, Rule> = get("/account", |cx: &mut Cx<'_, User>| {
+    let name = cx.identity().name.clone();
+    cx.text(200, &name);
+    Ok(())
+})
+.allow(Rule::SignedIn);
+```
+
+Named functions (`fn account(cx: &mut Cx<'_, User>) -> web_net::Result`) need nothing extra.
+
+## `Cx`: the handler context
+
+| Read | |
+|---|---|
+| `request() -> &Request` | the request |
+| `method()`, `path()`, `header(name)` | shortcuts |
+| `identity() -> &I` | who is asking (possibly a guest) |
+| `id() -> RequestId` | the reference shown on error pages |
+| `param(name) -> Option<Cow<str>>` | a route parameter, decoded |
+| `param_as::<T>(name) -> Result<T>` | parsed; 404 `route.param` when it does not parse |
+| `query(name) -> Result<Option<Cow<str>>>` | decoded; 400 `query.duplicate` for a repeated name |
+| `body() -> Result<&[u8]>` | the body |
+
+| Write | |
+|---|---|
+| `status(u16)` | default 200 |
+| `set_header(name, value)` | checked; a bad field or a framing field makes the reply a 500 |
+| `body_bytes(&[u8])`, `html(status, &str)`, `text(status, &str)` | the body |
+| `url(path) -> String` | the base path in front |
+| `see_other(path) -> Result` | 303 to a site-relative path |
+| `redirect(status, path) -> Result` | 301, 302, 303, 307, 308 to a site-relative path |
+| `render(&dyn View) -> Result` | the route's template |
+| `render_named(name, &dyn View) -> Result` | a template by name |
+
+The reply is held by web-net until the handler returns; on an error or a panic it is discarded and the error page is sent instead.
+
+## Gates
+
+```rust
+pub trait Identity: Send + Sync + 'static {
+    fn is_guest(&self) -> bool;
+    fn csrf_binding(&self) -> Option<&[u8]> { None }
+}
+pub trait Gate: Send + Sync + 'static {
+    type Identity: Identity;
+    type Rule: Send + Sync + 'static;
+    fn authenticate(&self, req: &Request<'_>) -> Result<Self::Identity, Denial>;
+    fn authorize(&self, who: &Self::Identity, rule: &Self::Rule, req: &Request<'_>) -> Result<(), Denial>;
+}
+pub struct Open;   // Identity = Guest, Rule = NoRule (no values)
+pub struct Guest;
+pub enum NoRule {}
+
+pub struct Denial;
+impl Denial {
+    pub const fn sign_in(code: &'static str) -> Self;     // 303 to sign-in for GET/HEAD, else 401
+    pub const fn forbidden(code: &'static str) -> Self;   // 403
+    pub const fn hidden(code: &'static str) -> Self;      // 404
+    pub const fn status(status: u16, code: &'static str) -> Self; // 4xx; anything else is 403
+    pub const fn kind(&self) -> DenialKind;
+    pub const fn code(&self) -> &'static str;
+    pub const fn status_code(&self) -> u16;
+}
+pub enum DenialKind { SignIn, Forbidden, Hidden, Status(u16) }
+```
+
+## `Request`
+
+What gates and handlers read: `method()`, `path()` (canonical, inside the site), `query()`, `host()`, `header(name)`, `header_str(name)`, `cookie(name) -> Result<Option<&str>, Ambiguous>`, `client()`, `scheme()`, `route()` (the matched pattern, for `authorize`), `id()`, `envelope()`, `raw()`.
+
+`RequestId` displays as `<connection hex>-<seq>`; `connection()`, `seq()`.
+
+## Hooks
+
+```rust
+pub enum Hook { Routed, Finish }
+impl Routes {
+    pub fn all() -> Self;
+    pub fn prefix(prefix: impl Into<String>) -> Self;   // segment-aware
+    pub fn named(names: &[&'static str]) -> Self;
+}
+```
+
+`Routed` runs after the access check, before the handler; `Finish` after the handler succeeded. An error from a hook ends the request with its status.
+
+## Rendering
+
+```rust
+pub trait Render: Send + Sync + 'static {
+    fn template(&self, name: &str) -> Option<TemplateId>;
+    fn render(&self, template: TemplateId, view: &dyn View, out: &mut Output<'_>) -> Result<(), RenderError>;
+}
+pub trait View {
+    fn shape(&self) -> &dyn Shape;
+    fn get(&self, key: Key) -> Value<'_>;
+    fn call(&self, key: Key, args: &[Value<'_>], with: &mut dyn FnMut(Value<'_>)) { /* Absent */ }
+}
+pub trait Shape { fn id(&self) -> ShapeId; fn key(&self, name: &str) -> Option<Key>; }
+pub trait List { fn len(&self) -> usize; fn is_empty(&self) -> bool; fn get(&self, index: usize) -> Value<'_>; }
+pub enum Value<'a> { Absent, Bool(bool), Int(i64), Float(f64), Text(&'a str), Html(SafeHtml<'a>),
+                     Display(&'a dyn Display), View(&'a dyn View), List(&'a dyn List) }
+pub struct SafeHtml<'a>;      // SafeHtml::trusted(&str), as_str()
+pub struct Fields<'a>(pub &'a [(&'a str, Value<'a>)]);   // a ready-made view, anonymous shape
+pub struct Output<'a>;        // new(&mut Vec<u8>, limit), write, write_str, len, is_empty, remaining
+pub struct RenderError;       // new(code), with_detail, code, detail
+pub struct TemplateId(pub u32);
+pub struct Key(pub u32);
+pub struct ShapeId(pub u64);  // ShapeId::ANONYMOUS
+```
+
+Error pages render the engine's `error/<status>` template when it has one, with the fields `status`, `title`, `message`, `reference`; otherwise a built-in page.
+
+## Errors
+
+```rust
+pub struct Error;
+impl Error {
+    pub fn new(status: u16, code: &'static str) -> Self;   // 400..=599, else 500
+    pub fn bad_request(code) -> Self; pub fn forbidden(code) -> Self; pub fn not_found(code) -> Self;
+    pub fn conflict(code) -> Self; pub fn unprocessable(code) -> Self; pub fn internal(code) -> Self;
+    pub fn unavailable(code) -> Self;
+    pub fn with_source(self, source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self;
+    pub fn status(&self) -> u16; pub fn code(&self) -> &'static str;
+    pub fn source_ref(&self) -> Option<&(dyn std::error::Error + Send + Sync + 'static)>;
+}
+pub type Result<T = (), E = Error> = std::result::Result<T, E>;
+pub struct BuildError;    // problems() -> &[Problem]
+pub struct Problem { pub subject: String, pub message: String }
+```
+
+## Events and checkpoints
+
+```rust
+pub trait Events: Send + Sync + 'static { fn event(&self, event: &Event<'_>) {} }
+pub struct NoEvents;
+pub struct Event<'a> { pub kind: EventKind, pub id: RequestId, pub route: Option<&'a str>,
+                       pub status: u16, pub code: &'static str,
+                       pub source: Option<&'a (dyn std::error::Error + 'static)> }
+pub enum EventKind { Refused, Denied, Failed, Panicked, Revoked }
+
+pub trait Checkpoint: Send + Sync + 'static { fn check(&self, env: &Envelope, at: Stage) -> serve_net::Verdict; }
+pub enum Stage { Authorized, BeforeRender }
+```
+
+Codes web-net reports: `url.not_absolute`, `url.bad_escape`, `url.encoded_slash`, `url.backslash`, `url.control`, `url.not_utf8`, `url.too_many_segments`, `url.asterisk`, `host.unknown`, `site.outside_base`, `route.none`, `method.not_allowed`, `method.unknown`, `checkpoint.denied`, `checkpoint.killed`, `reply.invalid_field`, `handler.panic`, plus the gates' and handlers' own codes.
+
+## URL rules
+
+`UrlError` (`code()`, `Display`): `NotAbsolute`, `BadEscape`, `EncodedSlash`, `Backslash`, `Control`, `NotUtf8`, `TooManySegments`. `TrailingSlash`: `Strip`, `Add`, `Ignore`. The rules are in PLAN section 4.
+
+## Constants
+
+- `VERSION: &str`: the crate version.
+- `MAX_PARAMS: usize = 8`: parameters per route pattern.
+- `DEFAULT_PAGE_LIMIT: usize = 8 MiB`: the default page budget.

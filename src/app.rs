@@ -1,0 +1,1202 @@
+//! The application: its site, its compiled routes, its gate, and the
+//! pipeline every request runs.
+
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+
+use serve_net::http_net::MethodSet;
+use serve_net::{
+    Envelope, HttpHead, HttpReply, HttpRequest, HttpService, Method, Outcome, Scheme, Verdict,
+    WorkClass,
+};
+
+use crate::cx::{Out, is_local_target};
+use crate::error::{self, BuildError, Problem};
+use crate::route::{Access, BoxHandler, Group, Route};
+use crate::router::{self, Captures, Trie};
+use crate::url::{self, TrailingSlash};
+use crate::{
+    Cx, Denial, DenialKind, Event, EventKind, Events, Fields, Gate, NoEvents, Open, Output, Render,
+    Request, RequestId, Result, Stage, TemplateId, Value,
+};
+
+/// The default budget for one rendered page.
+pub const DEFAULT_PAGE_LIMIT: usize = 8 << 20;
+
+/// Statuses with an error template lookup (`error/404`, ...).
+const ERROR_STATUSES: [u16; 14] = [
+    400, 401, 403, 404, 405, 409, 410, 413, 421, 422, 429, 500, 501, 503,
+];
+
+/// A named point in the pipeline where registered code runs, only for the
+/// routes it registered for. A route with no hooks pays nothing.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hook {
+    /// After the access check passed, before the handler: locale, feature
+    /// flags, an A/B variant. An error ends the request.
+    Routed,
+    /// After the handler succeeded, before the reply leaves: add headers.
+    /// An error replaces the reply with the error page.
+    Finish,
+}
+
+/// Which routes a hook runs for.
+#[derive(Clone, Debug)]
+pub struct Routes(Selector);
+
+#[derive(Clone, Debug)]
+enum Selector {
+    All,
+    Prefix(String),
+    Named(Vec<&'static str>),
+}
+
+impl Routes {
+    /// Every route.
+    #[must_use]
+    pub fn all() -> Self {
+        Self(Selector::All)
+    }
+
+    /// Routes whose pattern starts with `prefix` (`/blog`).
+    #[must_use]
+    pub fn prefix(prefix: impl Into<String>) -> Self {
+        Self(Selector::Prefix(prefix.into()))
+    }
+
+    /// Routes with one of these names.
+    #[must_use]
+    pub fn named(names: &[&'static str]) -> Self {
+        Self(Selector::Named(names.to_vec()))
+    }
+
+    fn matches(&self, pattern: &str, name: Option<&str>) -> bool {
+        match &self.0 {
+            Selector::All => true,
+            Selector::Prefix(p) => {
+                let p = p.trim_end_matches('/');
+                pattern == p
+                    || pattern
+                        .strip_prefix(p)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            }
+            Selector::Named(names) => name.is_some_and(|n| names.contains(&n)),
+        }
+    }
+}
+
+type HookFn<I> = Arc<dyn Fn(&mut Cx<'_, I>) -> Result + Send + Sync>;
+
+/// What [`App::classify`] tells a dispatcher before admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Classified {
+    /// The route that will run, if one matched.
+    pub route: Option<RouteId>,
+    /// How its handler behaves (`Quick` when nothing matched).
+    pub work: WorkClass,
+}
+
+/// A declared route (one method of one pattern), numbered in declaration
+/// order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RouteId(pub u32);
+
+/// The parts of the application every handler can reach.
+pub(crate) struct Shared {
+    pub(crate) render: Option<Box<dyn Render>>,
+    pub(crate) checkpoint: Option<Box<dyn crate::Checkpoint>>,
+    pub(crate) events: Box<dyn Events>,
+    pub(crate) page_limit: usize,
+    pub(crate) base: Box<str>,
+    errors: Vec<(u16, TemplateId)>,
+    sign_in: Option<Box<str>>,
+    challenge: Box<str>,
+    wipe: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Site {
+    /// Lower case; the first is canonical.
+    hosts: Vec<Box<str>>,
+    aliases: Vec<Box<str>>,
+    development: bool,
+    slash: TrailingSlash,
+    lowercase: bool,
+    https_only: bool,
+}
+
+struct Entry<G: Gate> {
+    handler: BoxHandler<G::Identity>,
+    access: Access<G::Rule>,
+    names: Box<[Box<str>]>,
+    pattern: Box<str>,
+    work: WorkClass,
+    template: Option<TemplateId>,
+    routed: Box<[HookFn<G::Identity>]>,
+    finish: Box<[HookFn<G::Identity>]>,
+}
+
+struct Endpoint {
+    /// Entry per method, by `Method::index`.
+    methods: [Option<u32>; 10],
+    allow: Box<str>,
+}
+
+/// A web application: one site, its routes, and its gate. Built once at
+/// start-up with [`App::builder`] or [`App::with_gate`]; immutable after.
+///
+/// It is a `serve_net::HttpService`, so it runs on serve-net as it is, and
+/// it has [`respond`](Self::respond) and
+/// [`respond_identified`](Self::respond_identified) for a wrapper that
+/// calls it from its own service.
+///
+/// ```
+/// use web_net::{App, get};
+///
+/// let app = App::builder()
+///     .route(get("/", |cx| { cx.html(200, "<h1>Hello</h1>"); Ok(()) }).public())
+///     .route(get("/users/:id", |cx| {
+///         let id: u64 = cx.param_as("id")?;
+///         cx.text(200, &format!("user {id}"));
+///         Ok(())
+///     }).public())
+///     .build()?;
+///
+/// let reply = serve_net::testing::respond(&app, b"GET /users/7 HTTP/1.1\r\nHost: a\r\n\r\n");
+/// assert_eq!((reply.status, reply.text()), (200, "user 7"));
+///
+/// let reply = serve_net::testing::respond(&app, b"GET /users/7/ HTTP/1.1\r\nHost: a\r\n\r\n");
+/// assert_eq!(reply.status, 301);
+/// assert_eq!(reply.header("location"), Some(&b"/users/7"[..]));
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
+pub struct App<G: Gate = Open> {
+    gate: G,
+    shared: Shared,
+    site: Site,
+    trie: Trie,
+    endpoints: Vec<Endpoint>,
+    entries: Vec<Entry<G>>,
+    allow_all: Box<str>,
+}
+
+impl App<Open> {
+    /// A builder with the [`Open`] gate: every visitor is a guest and every
+    /// route is declared public.
+    #[must_use]
+    pub fn builder() -> Builder<Open> {
+        Builder::new(Open)
+    }
+}
+
+impl<G: Gate> App<G> {
+    /// A builder with `gate` for authentication and authorization.
+    #[must_use]
+    pub fn with_gate(gate: G) -> Builder<G> {
+        Builder::new(gate)
+    }
+}
+
+/// Declares an application. Every mistake is reported by
+/// [`build`](Self::build) at once, before anything listens.
+pub struct Builder<G: Gate> {
+    gate: G,
+    routes: Vec<Route<G::Identity, G::Rule>>,
+    hooks: Vec<(Hook, Routes, HookFn<G::Identity>)>,
+    site: Site,
+    base: String,
+    render: Option<Box<dyn Render>>,
+    checkpoint: Option<Box<dyn crate::Checkpoint>>,
+    events: Box<dyn Events>,
+    page_limit: usize,
+    sign_in: Option<String>,
+    challenge: String,
+    wipe: bool,
+}
+
+impl<G: Gate> Builder<G> {
+    fn new(gate: G) -> Self {
+        Self {
+            gate,
+            routes: Vec::new(),
+            hooks: Vec::new(),
+            site: Site::default(),
+            base: String::new(),
+            render: None,
+            checkpoint: None,
+            events: Box::new(NoEvents),
+            page_limit: DEFAULT_PAGE_LIMIT,
+            sign_in: None,
+            challenge: "Session".into(),
+            wipe: false,
+        }
+    }
+
+    /// Adds a route.
+    #[must_use]
+    pub fn route(mut self, route: Route<G::Identity, G::Rule>) -> Self {
+        self.routes.push(route);
+        self
+    }
+
+    /// Adds a group's routes.
+    #[must_use]
+    pub fn group(mut self, group: Group<G::Identity, G::Rule>) -> Self {
+        self.routes.extend(group.into_routes());
+        self
+    }
+
+    /// Runs `f` at `hook` for the routes `routes` selects.
+    #[must_use]
+    pub fn hook<F>(mut self, hook: Hook, routes: Routes, f: F) -> Self
+    where
+        F: Fn(&mut Cx<'_, G::Identity>) -> Result + Send + Sync + 'static,
+    {
+        self.hooks.push((hook, routes, Arc::new(f)));
+        self
+    }
+
+    /// A host the site answers (`example.com`, or `localhost:8080` with its
+    /// port). The first one is canonical. With no host declared the site
+    /// answers any host; with hosts declared, any other host gets 421.
+    #[must_use]
+    pub fn host(mut self, host: &str) -> Self {
+        self.site.hosts.push(host.to_ascii_lowercase().into());
+        self
+    }
+
+    /// A host that is redirected (301, or 308 for unsafe methods) to the
+    /// canonical host (`www.example.com` to `example.com`).
+    #[must_use]
+    pub fn alias(mut self, host: &str) -> Self {
+        self.site.aliases.push(host.to_ascii_lowercase().into());
+        self
+    }
+
+    /// A development instance: `localhost`, `127.0.0.1`, `[::1]`, and
+    /// `*.localhost` are answered as the site (with any port), and HTTPS is
+    /// not required for them. Never set this in production: it is the only
+    /// way a `Host: localhost` is trusted.
+    #[must_use]
+    pub fn development(mut self) -> Self {
+        self.site.development = true;
+        self
+    }
+
+    /// The path the site is installed under (`/blog`). It is removed before
+    /// routing and added back by [`Cx::url`], so routes and links are written
+    /// as if the site were at `/`. Requests outside it get 404.
+    #[must_use]
+    pub fn base(mut self, base: &str) -> Self {
+        self.base = base.to_owned();
+        self
+    }
+
+    /// The trailing-slash policy (default [`TrailingSlash::Strip`]).
+    #[must_use]
+    pub fn trailing_slash(mut self, policy: TrailingSlash) -> Self {
+        self.site.slash = policy;
+        self
+    }
+
+    /// Paths are lower case: one with an upper-case letter is redirected.
+    #[must_use]
+    pub fn lowercase_paths(mut self) -> Self {
+        self.site.lowercase = true;
+        self
+    }
+
+    /// Plain HTTP is redirected to HTTPS on the canonical host (behind a
+    /// TLS proxy, serve-net must trust the proxy's scheme). Needs a host.
+    #[must_use]
+    pub fn https_only(mut self) -> Self {
+        self.site.https_only = true;
+        self
+    }
+
+    /// The site-relative sign-in page. A [`Denial::sign_in`] on a `GET` or
+    /// `HEAD` is then answered with a 303 to it, the page asked for passed
+    /// as `next`; without it, or for other methods, the answer is 401.
+    #[must_use]
+    pub fn sign_in(mut self, path: &str) -> Self {
+        self.sign_in = Some(path.to_owned());
+        self
+    }
+
+    /// The `WWW-Authenticate` challenge sent with a 401 (default
+    /// `Session`).
+    #[must_use]
+    pub fn challenge(mut self, challenge: &str) -> Self {
+        challenge.clone_into(&mut self.challenge);
+        self
+    }
+
+    /// The template engine.
+    #[must_use]
+    pub fn render(mut self, engine: impl Render) -> Self {
+        self.render = Some(Box::new(engine));
+        self
+    }
+
+    /// Where refusals, denials, and failures are reported.
+    #[must_use]
+    pub fn events(mut self, events: impl Events) -> Self {
+        self.events = Box::new(events);
+        self
+    }
+
+    /// The in-flight revocation check at web-net's stages.
+    #[must_use]
+    pub fn checkpoint(mut self, checkpoint: impl crate::Checkpoint) -> Self {
+        self.checkpoint = Some(Box::new(checkpoint));
+        self
+    }
+
+    /// The budget for one rendered page (default 8 MiB).
+    #[must_use]
+    pub fn page_limit(mut self, bytes: usize) -> Self {
+        self.page_limit = bytes;
+        self
+    }
+
+    /// Zero the reply buffers web-net reuses after every request, so one
+    /// visitor's page never lingers in memory another request reuses. Costs
+    /// one pass over the bytes written.
+    #[must_use]
+    pub fn wipe_buffers(mut self) -> Self {
+        self.wipe = true;
+        self
+    }
+
+    /// Compiles the application.
+    ///
+    /// # Errors
+    ///
+    /// A [`BuildError`] listing every problem: a route without declared
+    /// access, a malformed pattern, two handlers for one method of one
+    /// path, an unknown template, a malformed host or base path.
+    pub fn build(self) -> std::result::Result<App<G>, BuildError> {
+        let mut problems = Vec::new();
+        let mut problem = |subject: &str, message: String| {
+            problems.push(Problem {
+                subject: subject.to_owned(),
+                message,
+            });
+        };
+
+        // Site.
+        let base = self.base.trim_end_matches('/');
+        if !base.is_empty() {
+            match url::normalize(base, self.site.lowercase) {
+                Ok(n) if n == base && !base.contains(['?', '#']) => {}
+                _ => problem(
+                    "base",
+                    format!("'{}' is not a canonical path such as '/blog'", self.base),
+                ),
+            }
+        }
+        for h in self.site.hosts.iter().chain(&self.site.aliases) {
+            if !valid_host(h) {
+                problem("host", format!("'{h}' is not a host name or address"));
+            }
+        }
+        if self.site.https_only && self.site.hosts.is_empty() {
+            problem(
+                "https_only",
+                "redirecting to HTTPS needs a declared host; add .host(\"example.com\")".into(),
+            );
+        }
+        if let Some(s) = &self.sign_in {
+            if !is_local_target(s) {
+                problem("sign_in", format!("'{s}' is not a site-relative path"));
+            }
+        }
+        if self.challenge.is_empty() || !self.challenge.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+            problem("challenge", "the challenge must be visible ASCII".into());
+        }
+
+        // Error templates.
+        let mut errors = Vec::new();
+        if let Some(r) = &self.render {
+            for s in ERROR_STATUSES {
+                if let Some(t) = r.template(&format!("error/{s}")) {
+                    errors.push((s, t));
+                }
+            }
+        }
+
+        // Routes.
+        let mut trie = Trie::default();
+        let mut endpoints: Vec<Endpoint> = Vec::new();
+        let mut entries: Vec<Entry<G>> = Vec::new();
+        let mut all = MethodSet::EMPTY;
+        for r in self.routes {
+            let parts = match router::parse(&r.pattern) {
+                Ok(p) => p,
+                Err(e) => {
+                    problem(&r.pattern, e.message());
+                    continue;
+                }
+            };
+            if r.handlers.is_empty() {
+                problem(&r.pattern, "the route has no handler".into());
+                continue;
+            }
+            if matches!(r.access, Access::Undeclared) {
+                problem(
+                    &r.pattern,
+                    "the route declares no access; add .public() or .allow(rule)".into(),
+                );
+                continue;
+            }
+            let template = match (r.template, &self.render) {
+                (None, _) => None,
+                (Some(t), None) => {
+                    problem(
+                        &r.pattern,
+                        format!("template '{t}' is declared but no render engine is set"),
+                    );
+                    None
+                }
+                (Some(t), Some(engine)) => {
+                    let id = engine.template(t);
+                    if id.is_none() {
+                        problem(&r.pattern, format!("the engine has no template '{t}'"));
+                    }
+                    id
+                }
+            };
+            let ep = trie.insert(&parts, endpoints.len() as u32) as usize;
+            if ep == endpoints.len() {
+                endpoints.push(Endpoint {
+                    methods: [None; 10],
+                    allow: Box::from(""),
+                });
+            }
+            let names: Box<[Box<str>]> = router::names(&parts).into();
+            for (m, h) in r.handlers {
+                let subject = format!("{} {}", m.as_str().unwrap_or("?"), r.pattern);
+                if m == Method::Other || m == Method::Connect || m == Method::Trace {
+                    problem(&subject, "this method cannot be routed".into());
+                    continue;
+                }
+                let slot = &mut endpoints[ep].methods[m.index() as usize];
+                if slot.is_some() {
+                    problem(
+                        &subject,
+                        "a handler for this method and path exists already".into(),
+                    );
+                    continue;
+                }
+                *slot = Some(entries.len() as u32);
+                let pick = |at: Hook| -> Box<[HookFn<G::Identity>]> {
+                    self.hooks
+                        .iter()
+                        .filter(|(h, sel, _)| *h == at && sel.matches(&r.pattern, r.name))
+                        .map(|(_, _, f)| Arc::clone(f))
+                        .collect()
+                };
+                entries.push(Entry {
+                    handler: h,
+                    access: r.access.clone(),
+                    names: names.clone(),
+                    pattern: r.pattern.as_str().into(),
+                    work: r.work,
+                    template,
+                    routed: pick(Hook::Routed),
+                    finish: pick(Hook::Finish),
+                });
+            }
+        }
+        for e in &mut endpoints {
+            let mut set = MethodSet::EMPTY;
+            for m in [
+                Method::Get,
+                Method::Head,
+                Method::Post,
+                Method::Put,
+                Method::Delete,
+                Method::Options,
+                Method::Patch,
+            ] {
+                if e.methods[m.index() as usize].is_some() {
+                    set = set.with(m);
+                }
+            }
+            if set.contains(Method::Get) {
+                set = set.with(Method::Head);
+            }
+            set = set.with(Method::Options);
+            all = all.union(set);
+            let mut v = Vec::new();
+            set.write_allow(&mut v);
+            e.allow = String::from_utf8(v).unwrap_or_default().into();
+        }
+        if !problems.is_empty() {
+            return Err(BuildError::new(problems));
+        }
+        let mut v = Vec::new();
+        all.with(Method::Options).write_allow(&mut v);
+        Ok(App {
+            gate: self.gate,
+            shared: Shared {
+                render: self.render,
+                checkpoint: self.checkpoint,
+                events: self.events,
+                page_limit: self.page_limit,
+                base: base.into(),
+                errors,
+                sign_in: self.sign_in.map(Into::into),
+                challenge: self.challenge.into(),
+                wipe: self.wipe,
+            },
+            site: self.site,
+            trie,
+            endpoints,
+            entries,
+            allow_all: String::from_utf8(v).unwrap_or_default().into(),
+        })
+    }
+}
+
+impl<G: Gate> fmt::Debug for Builder<G> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Builder")
+            .field("routes", &self.routes)
+            .field("site", &self.site)
+            .field("base", &self.base)
+            .finish_non_exhaustive()
+    }
+}
+
+fn valid_host(h: &str) -> bool {
+    let (host, port) = split_port(h);
+    let host_ok = if let Some(inner) = host.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        inner.parse::<std::net::Ipv6Addr>().is_ok()
+    } else {
+        !host.is_empty()
+            && host.len() <= 253
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
+    };
+    host_ok && port.is_none_or(|p| !p.is_empty() && p.parse::<u16>().is_ok())
+}
+
+/// `example.com:8080` to (`example.com`, `Some("8080")`); `[::1]:80` to
+/// (`[::1]`, `Some("80")`).
+fn split_port(a: &str) -> (&str, Option<&str>) {
+    if a.starts_with('[') {
+        return match a.find(']') {
+            Some(i) => match a[i + 1..].strip_prefix(':') {
+                Some(p) => (&a[..=i], Some(p)),
+                None => (a, None),
+            },
+            None => (a, None),
+        };
+    }
+    match a.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (a, None),
+    }
+}
+
+fn is_dev_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]") || host.ends_with(".localhost")
+}
+
+thread_local! {
+    /// Reply buffers reused between requests on one thread. Taken for the
+    /// length of one request and put back, so nothing about a request lives
+    /// here between calls.
+    static SCRATCH: Cell<Option<Box<Out>>> = const { Cell::new(None) };
+}
+
+/// Buffers bigger than this are dropped instead of kept.
+const KEEP_CAPACITY: usize = 1 << 20;
+
+/// Where the site check sent a request.
+enum Placed<'a> {
+    Here(Cow<'a, str>),
+    Redirect(String),
+    Refuse(u16, &'static str, Option<url::UrlError>),
+}
+
+impl<G: Gate> App<G> {
+    /// Runs the whole pipeline for one request, authentication included.
+    pub fn respond(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
+        self.run(req, env, None, reply)
+    }
+
+    /// Runs the pipeline for a request whose caller authenticated it
+    /// already: web-net takes `who` as given and does not call the gate's
+    /// `authenticate`. Authorization still runs for every route that is
+    /// not public.
+    pub fn respond_identified(
+        &self,
+        req: &HttpRequest<'_>,
+        env: &Envelope,
+        who: &G::Identity,
+        reply: &mut HttpReply,
+    ) -> Outcome {
+        self.run(req, env, Some(who), reply)
+    }
+
+    /// Looks at a head before admission: which route would run and how it
+    /// behaves. Nothing is answered and no gate is called.
+    #[must_use]
+    pub fn classify(&self, head: &HttpHead<'_>) -> Classified {
+        let none = Classified {
+            route: None,
+            work: WorkClass::Quick,
+        };
+        let Placed::Here(path) = self.place(head.authority(), head.path(), Scheme::Https, true)
+        else {
+            return none;
+        };
+        let Some((ep, _)) = self.trie.find(&path) else {
+            return none;
+        };
+        match self.entry_for(ep as usize, head.method()) {
+            Some(i) => Classified {
+                route: Some(RouteId(i)),
+                work: self.entries[i as usize].work,
+            },
+            None => none,
+        }
+    }
+
+    /// The gate.
+    #[must_use]
+    pub fn gate(&self) -> &G {
+        &self.gate
+    }
+
+    fn entry_for(&self, ep: usize, m: Method) -> Option<u32> {
+        let methods = &self.endpoints[ep].methods;
+        match m {
+            Method::Other => None,
+            Method::Head => {
+                methods[Method::Head.index() as usize].or(methods[Method::Get.index() as usize])
+            }
+            m => methods[m.index() as usize],
+        }
+    }
+
+    /// Steps 1 and 2: which site, which canonical path. `quiet` (for
+    /// `classify`) skips building a redirect.
+    fn place<'a>(
+        &self,
+        authority: Option<&'a str>,
+        raw: &'a str,
+        scheme: Scheme,
+        quiet: bool,
+    ) -> Placed<'a> {
+        let site = &self.site;
+        let authority = authority.unwrap_or("");
+        let lower = authority.to_ascii_lowercase();
+        let lower = lower.trim_end_matches('.');
+        let host_only = split_port(lower).0.trim_end_matches('.');
+        let listed = |list: &[Box<str>]| {
+            list.iter().any(|h| {
+                let h = h.as_ref();
+                h == lower || (split_port(h).1.is_none() && h == host_only)
+            })
+        };
+        let dev = site.development && is_dev_host(host_only);
+        let mut target_host: Option<&str> = None;
+        if !site.hosts.is_empty() && !dev && !authority.is_empty() && !listed(&site.hosts) {
+            if listed(&site.aliases) {
+                target_host = site.hosts.first().map(AsRef::as_ref);
+            } else {
+                return Placed::Refuse(421, "host.unknown", None);
+            }
+        }
+        let mut https = scheme == Scheme::Https;
+        if site.https_only && !https && !dev {
+            https = true;
+            target_host = target_host.or(site.hosts.first().map(AsRef::as_ref));
+        }
+
+        // The path: canonical, inside the base, with the slash policy.
+        let canon = match url::normalize(raw, site.lowercase) {
+            Ok(c) => c,
+            Err(e) => return Placed::Refuse(400, e.code(), Some(e)),
+        };
+        let base = self.shared.base.as_ref();
+        let c: &str = &canon;
+        let rel_start = if base.is_empty() {
+            0
+        } else if c == base {
+            c.len()
+        } else if c.strip_prefix(base).is_some_and(|r| r.starts_with('/')) {
+            base.len()
+        } else {
+            return Placed::Refuse(404, "site.outside_base", None);
+        };
+        let rel = &c[rel_start..];
+        let mut fixed: Option<String> = None;
+        if rel.is_empty() {
+            fixed = Some("/".into());
+        } else if rel.len() > 1 {
+            match site.slash {
+                TrailingSlash::Strip => {
+                    if let Some(s) = rel.strip_suffix('/') {
+                        fixed = Some(s.to_owned());
+                    }
+                }
+                TrailingSlash::Add => {
+                    let last = rel.rsplit('/').next().unwrap_or("");
+                    if !rel.ends_with('/') && !last.contains('.') {
+                        fixed = Some(format!("{rel}/"));
+                    }
+                }
+                TrailingSlash::Ignore => {}
+            }
+        }
+        if target_host.is_none() && fixed.is_none() {
+            if let Cow::Borrowed(c) = canon {
+                let mut path = &c[rel_start..];
+                if site.slash == TrailingSlash::Ignore && path.len() > 1 {
+                    path = path.strip_suffix('/').unwrap_or(path);
+                }
+                return Placed::Here(Cow::Borrowed(path));
+            }
+        }
+        if quiet {
+            return Placed::Refuse(0, "", None);
+        }
+        let rel_out = fixed.as_deref().unwrap_or(rel);
+        let mut loc = String::with_capacity(raw.len() + 32);
+        if let Some(h) = target_host {
+            loc.push_str(if https { "https://" } else { "http://" });
+            loc.push_str(h);
+        }
+        loc.push_str(base);
+        loc.push_str(rel_out);
+        Placed::Redirect(loc)
+    }
+
+    fn run(
+        &self,
+        http: &HttpRequest<'_>,
+        env: &Envelope,
+        who: Option<&G::Identity>,
+        reply: &mut HttpReply,
+    ) -> Outcome {
+        let method = http.method();
+        let raw_path = http.path();
+        if raw_path == "*" {
+            if method == Method::Options {
+                reply.status(204).header("allow", self.allow_all.as_bytes());
+            } else {
+                self.refuse(
+                    400,
+                    "url.asterisk",
+                    EventKind::Refused,
+                    None,
+                    None,
+                    env,
+                    reply,
+                );
+            }
+            return Outcome::Done;
+        }
+        let authority = http.head().authority();
+        let host_raw = authority.unwrap_or("");
+        let placed = self.place(authority, raw_path, env.client().scheme(), false);
+        let path = match placed {
+            Placed::Here(path) => path,
+            Placed::Redirect(mut loc) => {
+                if let Some(q) = http.query() {
+                    loc.push('?');
+                    loc.push_str(q);
+                }
+                let status = if matches!(method, Method::Get | Method::Head) {
+                    301
+                } else {
+                    308
+                };
+                reply.status(status).header("location", loc.as_bytes());
+                return Outcome::Done;
+            }
+            Placed::Refuse(status, code, src) => {
+                let src = src
+                    .as_ref()
+                    .map(|e| e as &(dyn std::error::Error + 'static));
+                self.refuse(status, code, EventKind::Refused, None, src, env, reply);
+                return Outcome::Done;
+            }
+        };
+        let mut req = Request {
+            http,
+            env,
+            path: &path,
+            host: host_raw,
+            route: None,
+        };
+
+        // Authentication, unless the caller did it.
+        let owned;
+        let who: &G::Identity = match who {
+            Some(w) => w,
+            None => match self.gate.authenticate(&req) {
+                Ok(w) => {
+                    owned = w;
+                    &owned
+                }
+                Err(d) => {
+                    self.deny(d, &req, reply);
+                    return Outcome::Done;
+                }
+            },
+        };
+
+        // Route and method.
+        let Some((ep, caps)) = self.trie.find(&path) else {
+            self.refuse(
+                404,
+                "route.none",
+                EventKind::Refused,
+                None,
+                None,
+                env,
+                reply,
+            );
+            return Outcome::Done;
+        };
+        let endpoint = &self.endpoints[ep as usize];
+        let Some(idx) = self.entry_for(ep as usize, method) else {
+            if method == Method::Options {
+                reply.status(204).header("allow", endpoint.allow.as_bytes());
+                return Outcome::Done;
+            }
+            let status = if method == Method::Other { 501 } else { 405 };
+            let code = if status == 501 {
+                "method.unknown"
+            } else {
+                "method.not_allowed"
+            };
+            self.refuse(status, code, EventKind::Refused, None, None, env, reply);
+            if status == 405 {
+                reply.header("allow", endpoint.allow.as_bytes());
+            }
+            return Outcome::Done;
+        };
+        let entry = &self.entries[idx as usize];
+        req.route = Some(&entry.pattern);
+
+        // Authorization.
+        if let Access::Rule(rule) = &entry.access {
+            if let Err(d) = self.gate.authorize(who, rule, &req) {
+                self.deny(d, &req, reply);
+                return Outcome::Done;
+            }
+        }
+        if let Some(cp) = &self.shared.checkpoint {
+            match cp.check(env, Stage::Authorized) {
+                Verdict::Pass => {}
+                Verdict::Deny { status } => {
+                    self.refuse(
+                        status,
+                        "checkpoint.denied",
+                        EventKind::Revoked,
+                        req.route,
+                        None,
+                        env,
+                        reply,
+                    );
+                    return Outcome::Done;
+                }
+                _ => {
+                    self.refuse(
+                        403,
+                        "checkpoint.killed",
+                        EventKind::Revoked,
+                        req.route,
+                        None,
+                        env,
+                        reply,
+                    );
+                    return Outcome::Close;
+                }
+            }
+        }
+
+        // The handler, with its hooks, on a buffer web-net holds.
+        let mut out = SCRATCH.with(Cell::take).unwrap_or_default();
+        out.reset();
+        let outcome = self.handle(entry, req, who, caps, &mut out, reply);
+        if self.shared.wipe {
+            out.wipe();
+        }
+        if out.body.capacity() <= KEEP_CAPACITY && out.values.capacity() <= KEEP_CAPACITY {
+            SCRATCH.with(|s| s.set(Some(out)));
+        }
+        outcome
+    }
+
+    fn handle(
+        &self,
+        entry: &Entry<G>,
+        req: Request<'_>,
+        who: &G::Identity,
+        caps: Captures,
+        out: &mut Out,
+        reply: &mut HttpReply,
+    ) -> Outcome {
+        let env = req.env;
+        let route = req.route;
+        let result = {
+            let mut cx = Cx {
+                req,
+                who,
+                caps,
+                names: &entry.names,
+                out: &mut *out,
+                shared: &self.shared,
+                template: entry.template,
+            };
+            catch_unwind(AssertUnwindSafe(|| -> Result {
+                for h in entry.routed.iter() {
+                    h(&mut cx)?;
+                }
+                entry.handler.call(&mut cx)?;
+                for h in entry.finish.iter() {
+                    h(&mut cx)?;
+                }
+                Ok(())
+            }))
+        };
+        match result {
+            Ok(Ok(())) if !out.invalid => {
+                reply.status(out.status);
+                for &(ns, ne, vs, ve) in &out.spans {
+                    let name = core::str::from_utf8(&out.names[ns as usize..ne as usize])
+                        .unwrap_or("x-invalid");
+                    reply.header(name, &out.values[vs as usize..ve as usize]);
+                }
+                if !out.has("x-content-type-options") {
+                    reply.header("x-content-type-options", "nosniff");
+                }
+                reply.body(&out.body);
+                Outcome::Done
+            }
+            Ok(Ok(())) => {
+                out.reset();
+                self.refuse(
+                    500,
+                    "reply.invalid_field",
+                    EventKind::Failed,
+                    route,
+                    None,
+                    env,
+                    reply,
+                );
+                Outcome::Done
+            }
+            Ok(Err(e)) => {
+                out.reset();
+                let src = std::error::Error::source(&e);
+                self.refuse(
+                    e.status(),
+                    e.code(),
+                    EventKind::Failed,
+                    route,
+                    src,
+                    env,
+                    reply,
+                );
+                Outcome::Done
+            }
+            Err(_) => {
+                out.reset();
+                self.refuse(
+                    500,
+                    "handler.panic",
+                    EventKind::Panicked,
+                    route,
+                    None,
+                    env,
+                    reply,
+                );
+                Outcome::Done
+            }
+        }
+    }
+
+    /// A gate's denial as a response.
+    fn deny(&self, d: Denial, req: &Request<'_>, reply: &mut HttpReply) {
+        let env = req.env;
+        if d.kind() == DenialKind::SignIn {
+            if let Some(page) = &self.shared.sign_in {
+                if matches!(req.method(), Method::Get | Method::Head) {
+                    let mut loc = String::with_capacity(64);
+                    loc.push_str(&self.shared.base);
+                    loc.push_str(page);
+                    loc.push_str(if page.contains('?') {
+                        "&next="
+                    } else {
+                        "?next="
+                    });
+                    let mut next = String::new();
+                    next.push_str(&self.shared.base);
+                    next.push_str(req.path);
+                    if let Some(q) = req.query() {
+                        next.push('?');
+                        next.push_str(q);
+                    }
+                    encode_component(&next, &mut loc);
+                    self.event(EventKind::Denied, env, req.route, 303, d.code(), None);
+                    reply.status(303).header("location", loc.as_bytes());
+                    return;
+                }
+            }
+        }
+        let status = d.status_code();
+        self.refuse(
+            status,
+            d.code(),
+            EventKind::Denied,
+            req.route,
+            None,
+            env,
+            reply,
+        );
+        if status == 401 {
+            reply.header("www-authenticate", self.shared.challenge.as_bytes());
+        }
+    }
+
+    fn event(
+        &self,
+        kind: EventKind,
+        env: &Envelope,
+        route: Option<&str>,
+        status: u16,
+        code: &'static str,
+        source: Option<&(dyn std::error::Error + 'static)>,
+    ) {
+        self.shared.events.event(&Event {
+            kind,
+            id: RequestId::of(env),
+            route,
+            status,
+            code,
+            source,
+        });
+    }
+
+    /// The one function every refusal and error goes through: the status,
+    /// the error template for it or the built-in page, the reference; the
+    /// code and source to the events only.
+    #[allow(clippy::too_many_arguments)]
+    fn refuse(
+        &self,
+        status: u16,
+        code: &'static str,
+        kind: EventKind,
+        route: Option<&str>,
+        source: Option<&(dyn std::error::Error + 'static)>,
+        env: &Envelope,
+        reply: &mut HttpReply,
+    ) {
+        self.event(kind, env, route, status, code, source);
+        let reference = RequestId::of(env).to_string();
+        let mut body = Vec::with_capacity(512);
+        let mut done = false;
+        if let (Some(engine), Some(&(_, t))) = (
+            self.shared.render.as_deref(),
+            self.shared.errors.iter().find(|(s, _)| *s == status),
+        ) {
+            let fields = [
+                ("status", Value::Int(i64::from(status))),
+                ("title", Value::Text(error::title(status))),
+                ("message", Value::Text(error::message(status))),
+                ("reference", Value::Text(&reference)),
+            ];
+            let view = Fields(&fields);
+            let mut out = Output::new(&mut body, self.shared.page_limit);
+            if engine.render(t, &view, &mut out).is_ok() {
+                done = true;
+            } else {
+                body.clear();
+            }
+        }
+        if !done {
+            error::builtin_page(status, &reference, &mut body);
+        }
+        reply
+            .status(status)
+            .header("content-type", "text/html; charset=utf-8")
+            .header("x-content-type-options", "nosniff")
+            .header("cache-control", "no-store")
+            .body(&body);
+    }
+}
+
+impl<G: Gate> HttpService for App<G> {
+    fn call(&self, request: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
+        self.respond(request, env, reply)
+    }
+}
+
+impl<G: Gate> fmt::Debug for App<G> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("App")
+            .field("site", &self.site)
+            .field("base", &self.shared.base)
+            .field("routes", &self.entries.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Percent-encodes a query component: everything but unreserved and `/`.
+fn encode_component(s: &str, out: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 15) as usize] as char);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_port() {
+        assert_eq!(split_port("a.test:80"), ("a.test", Some("80")));
+        assert_eq!(split_port("a.test"), ("a.test", None));
+        assert_eq!(split_port("[::1]:8080"), ("[::1]", Some("8080")));
+        assert_eq!(split_port("[::1]"), ("[::1]", None));
+    }
+
+    #[test]
+    fn test_valid_host() {
+        for ok in ["example.com", "localhost:8080", "[::1]", "127.0.0.1:80"] {
+            assert!(valid_host(ok), "{ok}");
+        }
+        for bad in ["", "a b", "a:", "a:x", "[zz]", "a/b"] {
+            assert!(!valid_host(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_selector() {
+        assert!(Routes::prefix("/blog").matches("/blog", None));
+        assert!(Routes::prefix("/blog/").matches("/blog/:slug", None));
+        assert!(!Routes::prefix("/blog").matches("/blogger", None));
+        assert!(Routes::named(&["a"]).matches("/x", Some("a")));
+        assert!(!Routes::named(&["a"]).matches("/x", None));
+    }
+}

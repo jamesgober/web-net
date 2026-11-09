@@ -1,4 +1,4 @@
-# web-net &mdash; Engineering Directives
+# web-net - Engineering Directives
 
 > Engineering standards and the definition of done for this project. Read alongside `REPS.md` (root, authoritative), [`PLAN.md`](./PLAN.md) (design and decisions), and [`ROADMAP.md`](./ROADMAP.md) (current phase). If anything here conflicts with `REPS.md`, `REPS.md` wins, except where `PLAN.md` records an approved exception.
 
@@ -12,7 +12,7 @@ This library is built and maintained to a production standard and treated as a f
 
 ## 1. What this is
 
-web-net is the web framework: router, handlers, extractors, middleware with checkpoints, the HTTP adapters for serve-net's security slots, static files, rendering through a trait, and error pages. It runs inside serve-net and never touches sockets. See `PLAN.md` sections 1 and 2.
+web-net is the web layer: sites and canonical URLs, the router, the gate checkpoints (authentication and authorization), hooks, handlers, rendering through a trait that reads typed views, static files, and one error path. It runs inside serve-net and never touches sockets. See `PLAN.md` sections 1 to 3.
 
 ---
 
@@ -49,10 +49,12 @@ web-net is the web framework: router, handlers, extractors, middleware with chec
 
 ## 4. Project-specific invariants
 
-- An app with a route missing its contract or permission refuses to start.
-- Two spellings of one path always reach the same route; dot segments never match.
-- Route matching is allocation-free and linear in the number of segments.
-- A connection-gate checkpoint runs at every middleware boundary.
+- An app with a route that does not declare its access refuses to build.
+- A handler runs only after its route's access check passed (`Cx` is the proof).
+- Two spellings of one path always reach the same route; routing only sees canonical paths; `..` never rises above the root.
+- Route matching is allocation-free and visits each trie node at most once.
+- A failed or panicking handler never sends any part of its reply.
+- Every refusal, denial, and failure is reported through `Events`.
 - No error response contains internal details.
 - Static files never resolve outside their root.
 
