@@ -245,7 +245,7 @@ pub trait Render: Send + Sync + 'static {
     fn error_page(&self, page: &ErrorPage<'_>, out: &mut Output<'_>) -> Result<bool, RenderError> { Ok(false) }
 }
 pub struct NoRender;
-pub struct ErrorPage<'a> { pub status: u16, pub title: &'a str, pub message: &'a str, pub reference: &'a str }
+pub struct ErrorPage<'a> { pub status: u16, pub title: &'a str, pub message: &'a str, pub reference: &'a str }   // ErrorPage::new(..) for tests
 pub trait View {
     fn shape(&self) -> &dyn Shape;
     fn get(&self, key: Key) -> Value<'_>;

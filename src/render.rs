@@ -114,6 +114,25 @@ pub struct ErrorPage<'a> {
     pub reference: &'a str,
 }
 
+impl<'a> ErrorPage<'a> {
+    /// An error page's facts, for an engine's own tests (web-net makes the
+    /// real ones).
+    ///
+    /// ```
+    /// let p = web_net::ErrorPage::new(404, "Not Found", "The page was not found.", "1a-2");
+    /// assert_eq!((p.status, p.reference), (404, "1a-2"));
+    /// ```
+    #[must_use]
+    pub const fn new(status: u16, title: &'a str, message: &'a str, reference: &'a str) -> Self {
+        Self {
+            status,
+            title,
+            message,
+            reference,
+        }
+    }
+}
+
 /// A field or method of a view, resolved from a name by its [`Shape`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Key(pub u32);

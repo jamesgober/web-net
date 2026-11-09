@@ -34,7 +34,8 @@ The alpha: the API as it should freeze.
   routes and hooks. Handlers render with `cx.render(&view)`, or
   `cx.render_view(&dyn View)` for a dynamic engine. Error pages go through
   `Render::error_page` instead of an `error/<status>` template.
-  `Output::buffer`. `NoRender`, `ErrorPage`.
+  `Output::buffer`. `NoRender`, `ErrorPage` (with `ErrorPage::new` for an
+  engine's own tests).
 - `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]`:
   read their fields; web-net makes them.
 
