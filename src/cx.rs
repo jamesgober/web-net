@@ -744,7 +744,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     }
 }
 
-impl<'r, I, E> Cx<'r, I, E>
+impl<I, E> Cx<'_, I, E>
 where
     E: for<'a> Render<View<'a> = dyn View + 'a>,
 {

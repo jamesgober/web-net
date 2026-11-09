@@ -24,8 +24,8 @@ use crate::route::{Access, BoxHandler, Group, Route};
 use crate::router::{self, Captures, Trie};
 use crate::url::{self, TrailingSlash};
 use crate::{
-    Cx, Denial, DenialKind, ErrorPage, Event, EventKind, Events, Gate, Identity, NoEvents, NoRender,
-    Open, Output, Render, Request, RequestId, Result, Stage, TemplateId,
+    Cx, Denial, DenialKind, ErrorPage, Event, EventKind, Events, Gate, Identity, NoEvents,
+    NoRender, Open, Output, Render, Request, RequestId, Result, Stage, TemplateId,
 };
 
 /// The default budget for one rendered page.
@@ -241,7 +241,7 @@ impl<G: Gate, E: Render> App<G, E> {
     /// [`Cx::render`](crate::Cx::render) and the engine's view type (the
     /// application's own type for a typed engine), or with
     /// [`Cx::render_view`](crate::Cx::render_view) for an engine that reads
-    /// any [`View`].
+    /// any [`View`](crate::View).
     #[must_use]
     pub fn with(gate: G, engine: E) -> Builder<G, E> {
         let mut b = Builder::new(gate);
@@ -463,8 +463,6 @@ impl<G: Gate, E: Render> Builder<G, E> {
         challenge.clone_into(&mut self.challenge);
         self
     }
-
-
 
     /// Where refusals, denials, and failures are reported.
     #[must_use]
@@ -775,7 +773,9 @@ impl<G: Gate> Builder<G, NoRender> {
         if !self.routes.is_empty() || !self.hooks.is_empty() {
             b.early.push(Problem {
                 subject: "render".into(),
-                message: "set the template engine before adding routes and hooks (or use App::with)".into(),
+                message:
+                    "set the template engine before adding routes and hooks (or use App::with)"
+                        .into(),
             });
         }
         b.render = Some(engine);

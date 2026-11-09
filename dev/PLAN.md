@@ -169,9 +169,12 @@ Request id, access log, timing, CORS, security headers, CSRF, and compression, w
 
 ```rust
 pub trait Render: Send + Sync + 'static {
+    type View<'a>: ?Sized;           // dyn View + 'a for a dynamic engine; Page or Page<'a> for a typed one
     fn template(&self, name: &str) -> Option<TemplateId>;
-    fn render(&self, template: TemplateId, view: &dyn View, out: &mut Output<'_>) -> Result<(), RenderError>;
+    fn render(&self, template: TemplateId, view: &Self::View<'_>, out: &mut Output<'_>) -> Result<(), RenderError>;
+    fn error_page(&self, page: &ErrorPage<'_>, out: &mut Output<'_>) -> Result<bool, RenderError> { Ok(false) }
 }
+pub struct NoRender;                 // the engine of an app without one
 
 pub trait View {
     fn shape(&self) -> &dyn Shape;
@@ -180,12 +183,16 @@ pub trait View {
 }
 ```
 
+- Two kinds of engine, one trait (D-058). A **typed** engine compiles its templates at boot against the application's own types (`type View<'a> = Page<'a>`) and reads them directly: a misspelled field is a boot error, not an empty string. A **dynamic** engine reads any value through web-net's `View` (`type View<'a> = dyn View + 'a`): the shape for adapters to third-party engines. The view type is generic over a lifetime, so views may borrow what the handler has.
+- `App`, `Builder`, `Cx`, `Route`, `Group`, and `Sites` are generic over the engine, `E = NoRender` by default. `App::with(gate, engine)` sets it; `Builder::render(engine)` too, before any route or hook (they are typed by the engine; one added before is a build error). Static dispatch: no engine call goes through a vtable.
+- Handlers: `cx.render(&view)` with the engine's view type; `cx.render_view(&dyn View)` for a dynamic engine (so a `Fields` or any view coerces).
 - No JSON between data and engine (D-007). Building a text document from typed data and parsing it back costs tens of microseconds per page [est.] and loses every type. An engine resolves the names a template uses to `Key`s once (through the view's `Shape`, cached per `ShapeId`) and reads values by key while rendering.
 - `Value`: absent, bool, int, float, text, trusted HTML (`SafeHtml::trusted`, greppable), a computed `Display`, a nested view, a list. `call` passes its result to a closure, so a method can return a value computed for the call.
 - Templates a route names (`.template("post")`) are resolved at build; an unknown one stops the build. `Cx::render(&view)` renders the route's template; `render_named` resolves per call.
-- `Output` writes into the reply body with a page budget (default 8 MiB, `page_limit`).
+- `Output` writes into the reply body with a page budget (default 8 MiB, `page_limit`); `Output::buffer` hands an engine the `Vec<u8>` itself, and the budget is checked when it returns.
+- Error pages: `Render::error_page(&ErrorPage { status, title, message, reference })`; `Ok(false)` (the default) or an error leaves web-net's built-in page.
 - Escaping for each output context is the engine's job, with raw output behind an explicit marker. This is where cross-site scripting is prevented.
-- web-net has no engine and no template dependency. An engine implements `Render` in its own crate; third-party engines plug in through adapter crates that walk a `View` into their value type (D-004 revised).
+- web-net has no engine and no template dependency. An engine implements `Render` in its own crate (a first-party engine behind an optional feature of its own); third-party engines plug in through adapter crates that walk a `View` into their value type (D-004 revised).
 
 ---
 
@@ -468,9 +475,9 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-042 | 2026-11-08 | The warm request path allocates nothing, checked by a counting-allocator test against bare serve-net | a regression shows up as a failing test, not as a slow week |
 | D-043 | 2026-11-08 | `Accept` is parsed only when it names JSON | most requests never ask for JSON; the error-reply choice should cost them nothing |
 | D-044 | 2026-11-08 | `OPTIONS *` meets the host check like any request | a host the site does not serve learns nothing from it |
-| D-051 | 2026-11-09 | `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]` | web-net makes them and callers read them; a field added in 1.x must not break anyone |
-| D-052 | 2026-11-09 | `Cx::next_path` reads the sign-in redirect's `next` and returns it only when it is a path of this site | the sign-in page is the classic open-redirect target |
-| D-053 | 2026-11-09 | Template engines with their own typed API render straight into `Cx::body_mut`; `Render` stays for engines that read `View` | Luminess compiles against its own typed views; forcing it through `dyn View` would cost it its compile-time checks |
+| D-056 | 2026-11-09 | `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]` | web-net makes them and callers read them; a field added in 1.x must not break anyone |
+| D-057 | 2026-11-09 | `Cx::next_path` reads the sign-in redirect's `next` and returns it only when it is a path of this site | the sign-in page is the classic open-redirect target |
+| D-058 | 2026-11-09 | `Render` has a generic associated view type (`type View<'a>: ?Sized`); `App`, `Builder`, `Cx`, `Route`, and `Sites` are generic over the engine (`E = NoRender`); dynamic engines use `type View<'a> = dyn View + 'a` and handlers call `Cx::render_view`; error pages go through `Render::error_page` | agreed with the Luminess session and the coordinator: a typed engine compiles templates at boot against the application's own types and reads them directly, which `&dyn View` cannot carry (one wrapper per nested value); a GAT keeps borrowed views working for both kinds, and static dispatch costs nothing at run time |
 | D-046 | 2026-11-09 | Multipart CSRF tokens are checked before the handler, scanning the body up to its first file part | the 0.4 design let a handler run (and change state) before its reply was replaced; found by an independent review |
 | D-047 | 2026-11-09 | A reply that sets a cookie is never `public`; the cacheability report needs web-net's own `Cache-Control`, no CORS policy, and no cookie | a shared cache must not spread one visitor's cookie or one origin's CORS answer |
 | D-048 | 2026-11-09 | Resolved asset names below the root pass the segment rules again | 8.3 short names reached dot files on Windows |

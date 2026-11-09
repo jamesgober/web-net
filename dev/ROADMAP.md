@@ -66,7 +66,7 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - Moved to 0.9 (polish pass): fuzzing to 24 hours per target. Reason: the machine is shared and loaded; 0.7 ships after a shorter clean run, and the 0.9 polish pass runs both targets the full 24 hours on the final code.
 
 ## v0.8.0 - Alpha (DONE, 2026-11-09)
-- [x] A template engine in use: Luminess renders the example site's pages straight into the reply (`Cx::body_mut`, D-053).
+- [x] A template engine in use: Luminess renders the example site's pages straight into the reply (`Cx::body_mut`). `Render` gained a generic associated view type so Luminess can implement it directly, typed (D-058); its glue lands behind a feature in Luminess against web-net 0.8.
 - [x] A gate implementation: gatekeeper-io's `impl web_net::Gate` (its feature `web-net`) compiles and builds an `App` against 0.8 with only its version pin moved (checked locally; gatekeeper-io is not on crates.io yet, so nothing in this repository depends on it).
 - [x] form-net's alpha routes (login urlencoded with its token; avatar multipart with the token before the file) run in web-net (`tests/actions.rs`, `examples/site.rs`).
 - [x] Freeze review of the public API: `#[non_exhaustive]` on the structs web-net makes (`Event`, `Served`, `Classified`, `Problem`); `Cx::next_path` for sign-in pages.

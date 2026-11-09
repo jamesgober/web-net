@@ -95,8 +95,8 @@ pub use gate::{Denial, DenialKind, Gate, Guest, Identity, NoRule, Open};
 pub use headers::{DEFAULT_CSP, SecurityHeaders};
 pub use policy::{CachePolicy, Cacheable, Compression, Served};
 pub use render::{
-    ErrorPage, Fields, NoRender, Key, List, Output, Render, RenderError, SafeHtml, Shape, ShapeId, TemplateId, Value,
-    View,
+    ErrorPage, Fields, Key, List, NoRender, Output, Render, RenderError, SafeHtml, Shape, ShapeId,
+    TemplateId, Value, View,
 };
 pub use request::{Ambiguous, Request, RequestId};
 pub use route::{Group, Handler, Route, delete, get, patch, post, put};

@@ -81,7 +81,7 @@ impl<G: Gate> serve_net::HttpService for App<G>;
 | `https_only()` | plain HTTP redirected to HTTPS on the canonical host (needs a host) |
 | `sign_in(&str)` | the page a `Denial::sign_in` on `GET`/`HEAD` redirects to (303, with `next`) |
 | `challenge(&str)` | `WWW-Authenticate` for a 401 (default `Session`) |
-| `render(impl Render)` | the template engine |
+| `render(E)` | the template engine (before routes and hooks; or `App::with(gate, engine)`) |
 | `events(impl Events)` | where refusals, denials, and failures go |
 | `checkpoint(impl Checkpoint)` | in-flight revocation at web-net's stages |
 | `page_limit(usize)` | budget for one rendered page (default `DEFAULT_PAGE_LIMIT`, 8 MiB) |
@@ -175,8 +175,9 @@ Named functions (`fn account(cx: &mut Cx<'_, User>) -> web_net::Result`) need no
 | `next_path() -> Result<Option<String>>` | the sign-in redirect's `next`, only when it is a path of this site |
 | `redirect(status, path) -> Result` | 301, 302, 303, 307, 308 to a site-relative path |
 | `redirect_external(status, url) -> Result` | to a host from `redirect_hosts` only |
-| `render(&dyn View) -> Result` | the route's template |
-| `render_named(name, &dyn View) -> Result` | a template by name |
+| `render(&E::View) -> Result` | the route's template |
+| `render_view(&dyn View) -> Result` | the same, for a dynamic engine |
+| `render_named(name, &E::View) -> Result` | a template by name (`render_view_named` for a dynamic engine) |
 | `set_cookie(&cookie_net::SetCookie)` | a `Set-Cookie` field |
 | `not_modified(tag) -> bool` | sets `ETag`; `true` (and 304) when `If-None-Match` matches |
 
@@ -238,9 +239,13 @@ impl Routes {
 
 ```rust
 pub trait Render: Send + Sync + 'static {
+    type View<'a>: ?Sized;           // dyn View + 'a (dynamic engine) or the app's own type (typed engine)
     fn template(&self, name: &str) -> Option<TemplateId>;
-    fn render(&self, template: TemplateId, view: &dyn View, out: &mut Output<'_>) -> Result<(), RenderError>;
+    fn render(&self, template: TemplateId, view: &Self::View<'_>, out: &mut Output<'_>) -> Result<(), RenderError>;
+    fn error_page(&self, page: &ErrorPage<'_>, out: &mut Output<'_>) -> Result<bool, RenderError> { Ok(false) }
 }
+pub struct NoRender;
+pub struct ErrorPage<'a> { pub status: u16, pub title: &'a str, pub message: &'a str, pub reference: &'a str }
 pub trait View {
     fn shape(&self) -> &dyn Shape;
     fn get(&self, key: Key) -> Value<'_>;
@@ -252,14 +257,33 @@ pub enum Value<'a> { Absent, Bool(bool), Int(i64), Float(f64), Text(&'a str), Ht
                      Display(&'a dyn Display), View(&'a dyn View), List(&'a dyn List) }
 pub struct SafeHtml<'a>;      // SafeHtml::trusted(&str), as_str()
 pub struct Fields<'a>(pub &'a [(&'a str, Value<'a>)]);   // a ready-made view, anonymous shape
-pub struct Output<'a>;        // new(&mut Vec<u8>, limit), write, write_str, len, is_empty, remaining
+pub struct Output<'a>;        // new(&mut Vec<u8>, limit), write, write_str, buffer, len, is_empty, remaining
 pub struct RenderError;       // new(code), with_detail, code, detail
 pub struct TemplateId(pub u32);
 pub struct Key(pub u32);
 pub struct ShapeId(pub u64);  // ShapeId::ANONYMOUS
 ```
 
-Error pages render the engine's `error/<status>` template when it has one, with the fields `status`, `title`, `message`, `reference`; otherwise a built-in page.
+`App<G, E = NoRender>`: an engine is set with `App::with(gate, engine)` or `Builder::render(engine)` before routes and hooks. Handlers are `Cx<'_, I, E>`: `cx.render(&view)` takes `&E::View<'_>`; with a dynamic engine (`View<'a> = dyn View + 'a`), `cx.render_view(&dyn View)` and `render_view_named`.
+
+```rust
+use web_net::{App, Cx, Guest, Open, Output, Render, RenderError, TemplateId, get};
+struct Page<'a> { title: &'a str }
+struct Pages;
+impl Render for Pages {
+    type View<'a> = Page<'a>;
+    fn template(&self, name: &str) -> Option<TemplateId> { (name == "page").then_some(TemplateId(0)) }
+    fn render(&self, _t: TemplateId, p: &Page<'_>, out: &mut Output<'_>) -> Result<(), RenderError> {
+        out.write_str(p.title)   // a real engine escapes
+    }
+}
+let app = App::with(Open, Pages)
+    .route(get("/", |cx: &mut Cx<'_, Guest, Pages>| cx.render(&Page { title: "Home" })).public().template("page"))
+    .build()?;
+# Ok::<(), web_net::BuildError>(())
+```
+
+Error pages: `Render::error_page` with `ErrorPage { status, title, message, reference }`; `Ok(false)` or an error gives the built-in page.
 
 ## Errors
 

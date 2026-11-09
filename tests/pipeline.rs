@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use serve_net::testing::{TestReply, TestRequest, respond};
 use serve_net::{Envelope, Scheme, Verdict};
 use web_net::{
-    App, Checkpoint, Cx, Denial, Error, Event, EventKind, Events, Gate, Group, Hook, Identity,
-    Output, Render, RenderError, Request, Route, Routes, Stage, TemplateId, TrailingSlash, Value,
-    View, get, post,
+    App, Checkpoint, Cx, Denial, Error, ErrorPage, Event, EventKind, Events, Gate, Group, Hook,
+    Identity, Output, Render, RenderError, Request, Route, Routes, Stage, TemplateId,
+    TrailingSlash, Value, View, get, post,
 };
 
 fn req(app: &impl serve_net::HttpService, raw: &str) -> TestReply {
@@ -652,7 +652,6 @@ impl Render for Mini {
     fn template(&self, name: &str) -> Option<TemplateId> {
         match name {
             "page" => Some(TemplateId(0)),
-            "error/404" => Some(TemplateId(1)),
             _ => None,
         }
     }
@@ -673,14 +672,17 @@ impl Render for Mini {
                 out.write_str(&title.replace('<', "&lt;"))?;
                 out.write_str("</h1>")
             }
-            _ => {
-                let Some(Value::Text(r)) = field("reference") else {
-                    return Err(RenderError::new("mini.no_ref"));
-                };
-                out.write_str("missing ")?;
-                out.write_str(r)
-            }
+            _ => Err(RenderError::new("mini.unknown")),
         }
+    }
+
+    fn error_page(&self, page: &ErrorPage<'_>, out: &mut Output<'_>) -> Result<bool, RenderError> {
+        if page.status != 404 {
+            return Ok(false);
+        }
+        out.write_str("missing ")?;
+        out.write_str(page.reference)?;
+        Ok(true)
     }
 }
 

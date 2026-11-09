@@ -24,6 +24,17 @@ The alpha: the API as it should freeze.
 
 ### Changed
 
+- **`Render` has a generic associated view type** (`type View<'a>: ?Sized`),
+  agreed with the Luminess engine and the platform design (PLAN D-058). A
+  typed engine compiles against the application's own types
+  (`type View<'a> = Page<'a>`); a dynamic one keeps reading web-net's `View`
+  (`type View<'a> = dyn View + 'a`). `App`, `Builder`, `Cx`, `Route`,
+  `Group`, `Handler`, and `Sites` are generic over the engine (`E =
+  NoRender`); `App::with(gate, engine)`; `Builder::render` must come before
+  routes and hooks. Handlers render with `cx.render(&view)`, or
+  `cx.render_view(&dyn View)` for a dynamic engine. Error pages go through
+  `Render::error_page` instead of an `error/<status>` template.
+  `Output::buffer`. `NoRender`, `ErrorPage`.
 - `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]`:
   read their fields; web-net makes them.
 

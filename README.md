@@ -91,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Plugging in
 
 - **Authentication and authorization**: implement `Gate` (`authenticate`, `authorize`) and `Identity`. `App::with_gate(gate)`. A front layer that authenticates on its own calls `App::respond_identified`.
-- **Templates**: implement `Render` and read values through `View`. Engines live in their own crates; web-net depends on none.
+- **Templates**: implement `Render`. A typed engine compiles against your own types (`type View<'a> = Page<'a>`); a dynamic one reads any `View`. `App::with(gate, engine)`. Engines live in their own crates; web-net depends on none.
 - **Detection and logs**: implement `Events` (every refusal, denial, failure, panic) and `Checkpoint` (in-flight revocation).
 
 Built in: static files (`Assets`: validators, ranges, precompressed variants, no escape from the folder), health and readiness paths, strict security headers by default (`SecurityHeaders`), cookies out through cookie-net, and a 304 fast path for pages (`Cx::not_modified`).
