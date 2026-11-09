@@ -29,6 +29,7 @@ pub enum EventKind {
 }
 
 /// One event.
+#[non_exhaustive]
 #[derive(Debug)]
 pub struct Event<'a> {
     /// What happened.

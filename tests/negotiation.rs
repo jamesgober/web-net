@@ -399,6 +399,8 @@ fn test_cache_policy_and_report() {
 struct Two;
 
 impl Render for Two {
+    type View<'a> = dyn View + 'a;
+
     fn template(&self, name: &str) -> Option<TemplateId> {
         match name {
             "a" => Some(TemplateId(0)),
@@ -409,7 +411,7 @@ impl Render for Two {
     fn render(
         &self,
         t: TemplateId,
-        view: &dyn View,
+        view: &(dyn View + '_),
         out: &mut Output<'_>,
     ) -> Result<(), RenderError> {
         let title = view.shape().key("title").map(|k| view.get(k));
@@ -431,7 +433,7 @@ fn test_before_render_hook() {
         })
         .route(
             get("/", |cx| {
-                cx.render(&web_net::Fields(&[("title", Value::Text("t"))]))
+                cx.render_view(&web_net::Fields(&[("title", Value::Text("t"))]))
             })
             .public()
             .template("a"),

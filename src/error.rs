@@ -166,6 +166,7 @@ impl From<crate::RenderError> for Error {
 pub type Result<T = (), E = Error> = std::result::Result<T, E>;
 
 /// One thing wrong with an application's declaration.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Problem {
     /// The route or setting it is about (`"GET /admin"`, `"host"`).

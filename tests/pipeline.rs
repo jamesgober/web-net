@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use serve_net::testing::{TestReply, TestRequest, respond};
 use serve_net::{Envelope, Scheme, Verdict};
 use web_net::{
-    App, Checkpoint, Cx, Denial, Error, Event, EventKind, Events, Gate, Group, Hook, Identity,
-    Output, Render, RenderError, Request, Route, Routes, Stage, TemplateId, TrailingSlash, Value,
-    View, get, post,
+    App, Checkpoint, Cx, Denial, Error, ErrorPage, Event, EventKind, Events, Gate, Group, Hook,
+    Identity, Output, Render, RenderError, Request, Route, Routes, Stage, TemplateId,
+    TrailingSlash, Value, View, get, post,
 };
 
 fn req(app: &impl serve_net::HttpService, raw: &str) -> TestReply {
@@ -647,10 +647,11 @@ fn test_hooks_run_for_their_routes_only() {
 struct Mini;
 
 impl Render for Mini {
+    type View<'a> = dyn View + 'a;
+
     fn template(&self, name: &str) -> Option<TemplateId> {
         match name {
             "page" => Some(TemplateId(0)),
-            "error/404" => Some(TemplateId(1)),
             _ => None,
         }
     }
@@ -658,7 +659,7 @@ impl Render for Mini {
     fn render(
         &self,
         t: TemplateId,
-        view: &dyn View,
+        view: &(dyn View + '_),
         out: &mut Output<'_>,
     ) -> Result<(), RenderError> {
         let field = |name| view.shape().key(name).map(|k| view.get(k));
@@ -671,14 +672,17 @@ impl Render for Mini {
                 out.write_str(&title.replace('<', "&lt;"))?;
                 out.write_str("</h1>")
             }
-            _ => {
-                let Some(Value::Text(r)) = field("reference") else {
-                    return Err(RenderError::new("mini.no_ref"));
-                };
-                out.write_str("missing ")?;
-                out.write_str(r)
-            }
+            _ => Err(RenderError::new("mini.unknown")),
         }
+    }
+
+    fn error_page(&self, page: &ErrorPage<'_>, out: &mut Output<'_>) -> Result<bool, RenderError> {
+        if page.status != 404 {
+            return Ok(false);
+        }
+        out.write_str("missing ")?;
+        out.write_str(page.reference)?;
+        Ok(true)
     }
 }
 
@@ -689,20 +693,20 @@ fn test_render_through_the_view() {
         .page_limit(64)
         .route(
             get("/", |cx| {
-                cx.render(&web_net::Fields(&[("title", Value::Text("Hi <you>"))]))
+                cx.render_view(&web_net::Fields(&[("title", Value::Text("Hi <you>"))]))
             })
             .public()
             .template("page"),
         )
         .route(
-            get("/broken", |cx| cx.render(&web_net::Fields(&[])))
+            get("/broken", |cx| cx.render_view(&web_net::Fields(&[])))
                 .public()
                 .template("page"),
         )
         .route(
             get("/big", |cx| {
                 let t = "x".repeat(100);
-                cx.render(&web_net::Fields(&[("title", Value::Text(&t))]))
+                cx.render_view(&web_net::Fields(&[("title", Value::Text(&t))]))
             })
             .public()
             .template("page"),
@@ -742,7 +746,7 @@ fn test_checkpoint_stops_render() {
         .checkpoint(Revoke)
         .route(
             get("/", |cx| {
-                cx.render(&web_net::Fields(&[("title", Value::Text("x"))]))
+                cx.render_view(&web_net::Fields(&[("title", Value::Text("x"))]))
             })
             .public()
             .template("page"),

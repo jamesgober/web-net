@@ -13,6 +13,34 @@
 
 ---
 
+## [0.8.0] - 2026-11-09
+
+The alpha: the API as it should freeze.
+
+### Added
+
+- `Cx::next_path`: the sign-in redirect's `next`, only when it is a path of
+  this site.
+
+### Changed
+
+- **`Render` has a generic associated view type** (`type View<'a>: ?Sized`),
+  agreed with the Luminess engine and the platform design (PLAN D-058). A
+  typed engine compiles against the application's own types
+  (`type View<'a> = Page<'a>`); a dynamic one keeps reading web-net's `View`
+  (`type View<'a> = dyn View + 'a`). `App`, `Builder`, `Cx`, `Route`,
+  `Group`, `Handler`, and `Sites` are generic over the engine (`E =
+  NoRender`); `App::with(gate, engine)`; `Builder::render` must come before
+  routes and hooks. Handlers render with `cx.render(&view)`, or
+  `cx.render_view(&dyn View)` for a dynamic engine. Error pages go through
+  `Render::error_page` instead of an `error/<status>` template.
+  `Output::buffer`. `NoRender`, `ErrorPage` (with `ErrorPage::new` for an
+  engine's own tests).
+- `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]`:
+  read their fields; web-net makes them.
+
+---
+
 ## [0.7.0] - 2026-11-09
 
 Hardening.
@@ -249,7 +277,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jamesgober/web-net/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamesgober/web-net/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamesgober/web-net/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamesgober/web-net/compare/v0.4.0...v0.5.0

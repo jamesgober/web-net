@@ -10,7 +10,7 @@ use serve_net::{Method, Verdict};
 use crate::app::Shared;
 use crate::error::Error;
 use crate::router::Captures;
-use crate::{Output, Request, RequestId, Result, Stage, TemplateId, View, url};
+use crate::{NoRender, Output, Render, Request, RequestId, Result, Stage, TemplateId, View, url};
 
 /// The reply a handler writes. Held by web-net until the handler returns, so
 /// an error or a panic replaces it whole: nothing a failed handler set (a
@@ -131,21 +131,21 @@ pub(crate) fn is_local_target(p: &str) -> bool {
 ///
 /// There is no public way to make one: web-net builds it only after the
 /// gate cleared the request.
-pub struct Cx<'r, I> {
+pub struct Cx<'r, I, E: Render = NoRender> {
     pub(crate) req: Request<'r>,
     pub(crate) who: &'r I,
     pub(crate) caps: Captures,
     pub(crate) names: &'r [Box<str>],
     pub(crate) out: &'r mut Out,
-    pub(crate) shared: &'r Shared,
+    pub(crate) shared: &'r Shared<E>,
     pub(crate) template: Option<TemplateId>,
     pub(crate) binding: Option<&'r [u8]>,
     pub(crate) limits: &'r form_net::Limits,
-    pub(crate) before_render: &'r [crate::app::HookFn<I>],
+    pub(crate) before_render: &'r [crate::app::HookFn<I, E>],
     pub(crate) rendering: bool,
 }
 
-impl<'r, I> Cx<'r, I> {
+impl<'r, I, E: Render> Cx<'r, I, E> {
     // ---------------------------------------------------------------- request
 
     /// The request.
@@ -561,6 +561,52 @@ impl<'r, I> Cx<'r, I> {
         self.redirect(303, path)
     }
 
+    /// The page a sign-in redirect asked for: the `next` query parameter
+    /// web-net puts on the redirect to the sign-in page, as a site-relative
+    /// path safe to pass to [`see_other`](Self::see_other) once the visitor
+    /// signed in. `None` when there is none, or when it is not a path of this
+    /// site (an attacker's link to the sign-in page cannot turn it into an
+    /// open redirect).
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .base("/app")
+    ///     .route(get("/login", |cx| {
+    ///         let next = cx.next_path()?.unwrap_or_else(|| "/".into());
+    ///         cx.text(200, &next);
+    ///         Ok(())
+    ///     }).public())
+    ///     .build()?;
+    /// let at = |q: &str| serve_net::testing::respond(&app, format!("GET /app/login?{q} HTTP/1.1\r\nHost: a\r\n\r\n").as_bytes()).text().to_owned();
+    /// assert_eq!(at("next=/app/account%3Ftab%3D2"), "/account?tab=2");
+    /// assert_eq!(at("next=//evil.example"), "/");
+    /// assert_eq!(at("next=/elsewhere"), "/");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`query`](Self::query): 400 when `next` is given twice or does not
+    /// decode.
+    pub fn next_path(&self) -> Result<Option<String>> {
+        let Some(next) = self.query("next")? else {
+            return Ok(None);
+        };
+        let base = self.shared.base.as_ref();
+        let rel = if base.is_empty() {
+            next.as_ref()
+        } else {
+            match next.strip_prefix(base) {
+                Some("") => "/",
+                Some(r) if r.starts_with('/') => r,
+                _ => return Ok(None),
+            }
+        };
+        Ok(is_local_target(rel).then(|| rel.to_owned()))
+    }
+
     /// A redirect to another site, only to a host listed with
     /// [`Builder::redirect_hosts`](crate::Builder::redirect_hosts):
     /// `https://` (or `http://`), the host, and a visible-ASCII rest.
@@ -634,7 +680,7 @@ impl<'r, I> Cx<'r, I> {
     /// 500 `render.no_engine` or `render.no_template` when nothing can
     /// render; the engine's own [`RenderError`](crate::RenderError) as a 500;
     /// a checkpoint's denial.
-    pub fn render(&mut self, view: &dyn View) -> Result {
+    pub fn render(&mut self, view: &E::View<'_>) -> Result {
         let t = self
             .template
             .ok_or_else(|| Error::internal("render.no_template"))?;
@@ -648,11 +694,11 @@ impl<'r, I> Cx<'r, I> {
     /// # Errors
     ///
     /// As [`render`](Self::render).
-    pub fn render_named(&mut self, name: &str, view: &dyn View) -> Result {
+    pub fn render_named(&mut self, name: &str, view: &E::View<'_>) -> Result {
         let engine = self
             .shared
             .render
-            .as_deref()
+            .as_ref()
             .ok_or_else(|| Error::internal("render.no_engine"))?;
         let t = engine
             .template(name)
@@ -660,11 +706,11 @@ impl<'r, I> Cx<'r, I> {
         self.render_id(t, view)
     }
 
-    fn render_id(&mut self, t: TemplateId, view: &dyn View) -> Result {
+    fn render_id(&mut self, t: TemplateId, view: &E::View<'_>) -> Result {
         let engine = self
             .shared
             .render
-            .as_deref()
+            .as_ref()
             .ok_or_else(|| Error::internal("render.no_engine"))?;
         if !self.rendering {
             // Hooks may render too; they do not run their own hooks again.
@@ -684,16 +730,47 @@ impl<'r, I> Cx<'r, I> {
         self.out.body.clear();
         let mut output = Output::new(&mut self.out.body, self.shared.page_limit);
         let rendered = engine.render(t, view, &mut output);
+        let over = output.over();
         if let Err(e) = rendered {
             self.out.body.clear();
             return Err(e.into());
+        }
+        if over {
+            self.out.body.clear();
+            return Err(crate::RenderError::new("render.too_large").into());
         }
         self.content_type("text/html; charset=utf-8");
         Ok(())
     }
 }
 
-impl<I> fmt::Debug for Cx<'_, I> {
+impl<I, E> Cx<'_, I, E>
+where
+    E: for<'a> Render<View<'a> = dyn View + 'a>,
+{
+    /// [`render`](Self::render) for an engine that reads any [`View`] (a
+    /// dynamic engine): takes `&dyn View`, so a [`Fields`](crate::Fields)
+    /// or any view of yours goes in as it is.
+    ///
+    /// # Errors
+    ///
+    /// As [`render`](Self::render).
+    pub fn render_view(&mut self, view: &dyn View) -> Result {
+        self.render(view)
+    }
+
+    /// [`render_named`](Self::render_named) for an engine that reads any
+    /// [`View`].
+    ///
+    /// # Errors
+    ///
+    /// As [`render`](Self::render).
+    pub fn render_view_named(&mut self, name: &str, view: &dyn View) -> Result {
+        self.render_named(name, view)
+    }
+}
+
+impl<I, E: Render> fmt::Debug for Cx<'_, I, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cx")
             .field("request", &self.req)

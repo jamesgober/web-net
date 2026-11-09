@@ -4,25 +4,25 @@ use std::sync::Arc;
 
 use serve_net::{Method, WorkClass};
 
-use crate::{Cx, Result};
+use crate::{Cx, NoRender, Render, Result};
 
-/// A request handler. Any `Fn(&mut Cx<'_, I>) -> web_net::Result` is one.
-pub trait Handler<I>: Send + Sync + 'static {
+/// A request handler. Any `Fn(&mut Cx<'_, I, E>) -> web_net::Result` is one.
+pub trait Handler<I, E: Render = NoRender>: Send + Sync + 'static {
     /// Handles one cleared request.
     ///
     /// # Errors
     ///
     /// An [`Error`](crate::Error), answered with the site's error page for
     /// its status.
-    fn call(&self, cx: &mut Cx<'_, I>) -> Result;
+    fn call(&self, cx: &mut Cx<'_, I, E>) -> Result;
 }
 
-impl<I, F> Handler<I> for F
+impl<I, E: Render, F> Handler<I, E> for F
 where
-    F: Fn(&mut Cx<'_, I>) -> Result + Send + Sync + 'static,
+    F: Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync + 'static,
 {
     #[inline]
-    fn call(&self, cx: &mut Cx<'_, I>) -> Result {
+    fn call(&self, cx: &mut Cx<'_, I, E>) -> Result {
         self(cx)
     }
 }
@@ -48,7 +48,7 @@ impl<R> Clone for Access<R> {
     }
 }
 
-pub(crate) type BoxHandler<I> = Arc<dyn Handler<I>>;
+pub(crate) type BoxHandler<I, E> = Arc<dyn Handler<I, E>>;
 
 /// A route: a path pattern, one handler per method, and who may use it.
 ///
@@ -96,9 +96,9 @@ pub(crate) type BoxHandler<I> = Arc<dyn Handler<I>>;
 /// .allow(Rule::SignedIn);
 /// # let _ = account;
 /// ```
-pub struct Route<I, R> {
+pub struct Route<I, R, E: Render = NoRender> {
     pub(crate) pattern: String,
-    pub(crate) handlers: Vec<(Method, BoxHandler<I>)>,
+    pub(crate) handlers: Vec<(Method, BoxHandler<I, E>)>,
     pub(crate) access: Access<R>,
     pub(crate) name: Option<&'static str>,
     pub(crate) work: WorkClass,
@@ -109,7 +109,7 @@ pub struct Route<I, R> {
     pub(crate) cache: crate::CachePolicy,
 }
 
-impl<I: 'static, R> Route<I, R> {
+impl<I: 'static, R, E: Render> Route<I, R, E> {
     /// A route at `pattern` with no methods yet.
     #[must_use]
     pub fn at(pattern: impl Into<String>) -> Self {
@@ -130,7 +130,7 @@ impl<I: 'static, R> Route<I, R> {
     /// Adds a handler for `method`. `HEAD` follows `GET` unless it has its
     /// own; `OPTIONS` is answered for every route unless it has its own.
     #[must_use]
-    pub fn on(mut self, method: Method, handler: impl Handler<I>) -> Self {
+    pub fn on(mut self, method: Method, handler: impl Handler<I, E>) -> Self {
         self.handlers.push((method, Arc::new(handler)));
         self
     }
@@ -139,7 +139,7 @@ impl<I: 'static, R> Route<I, R> {
     #[must_use]
     pub fn get<F>(self, f: F) -> Self
     where
-        F: Fn(&mut Cx<'_, I>) -> Result + Send + Sync + 'static,
+        F: Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync + 'static,
     {
         self.on(Method::Get, f)
     }
@@ -148,7 +148,7 @@ impl<I: 'static, R> Route<I, R> {
     #[must_use]
     pub fn post<F>(self, f: F) -> Self
     where
-        F: Fn(&mut Cx<'_, I>) -> Result + Send + Sync + 'static,
+        F: Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync + 'static,
     {
         self.on(Method::Post, f)
     }
@@ -157,7 +157,7 @@ impl<I: 'static, R> Route<I, R> {
     #[must_use]
     pub fn put<F>(self, f: F) -> Self
     where
-        F: Fn(&mut Cx<'_, I>) -> Result + Send + Sync + 'static,
+        F: Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync + 'static,
     {
         self.on(Method::Put, f)
     }
@@ -166,7 +166,7 @@ impl<I: 'static, R> Route<I, R> {
     #[must_use]
     pub fn patch<F>(self, f: F) -> Self
     where
-        F: Fn(&mut Cx<'_, I>) -> Result + Send + Sync + 'static,
+        F: Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync + 'static,
     {
         self.on(Method::Patch, f)
     }
@@ -175,7 +175,7 @@ impl<I: 'static, R> Route<I, R> {
     #[must_use]
     pub fn delete<F>(self, f: F) -> Self
     where
-        F: Fn(&mut Cx<'_, I>) -> Result + Send + Sync + 'static,
+        F: Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync + 'static,
     {
         self.on(Method::Delete, f)
     }
@@ -257,7 +257,7 @@ impl<I: 'static, R> Route<I, R> {
     }
 }
 
-impl<I, R> std::fmt::Debug for Route<I, R> {
+impl<I, R, E: Render> std::fmt::Debug for Route<I, R, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Route")
             .field("pattern", &self.pattern)
@@ -274,9 +274,9 @@ macro_rules! method_fn {
     ($(#[$doc:meta])* $fn:ident, $m:ident) => {
         $(#[$doc])*
         #[must_use]
-        pub fn $fn<I: 'static, R, F>(pattern: impl Into<String>, f: F) -> Route<I, R>
+        pub fn $fn<I: 'static, R, E: Render, F>(pattern: impl Into<String>, f: F) -> Route<I, R, E>
         where
-            F: Fn(&mut Cx<'_, I>) -> Result + Send + Sync + 'static,
+            F: Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync + 'static,
         {
             Route::at(pattern).on(Method::$m, f)
         }
@@ -322,15 +322,15 @@ method_fn!(
 ///     .build()?;
 /// # Ok::<(), web_net::BuildError>(())
 /// ```
-pub struct Group<I, R> {
+pub struct Group<I, R, E: Render = NoRender> {
     pub(crate) prefix: String,
     pub(crate) access: Access<R>,
-    pub(crate) routes: Vec<Route<I, R>>,
+    pub(crate) routes: Vec<Route<I, R, E>>,
     pub(crate) cors: Option<Arc<crate::Cors>>,
     pub(crate) cache: crate::CachePolicy,
 }
 
-impl<I: 'static, R> Group<I, R> {
+impl<I: 'static, R, E: Render> Group<I, R, E> {
     /// A group under `prefix` (`/admin`).
     #[must_use]
     pub fn new(prefix: impl Into<String>) -> Self {
@@ -373,7 +373,7 @@ impl<I: 'static, R> Group<I, R> {
 
     /// Adds a route; its pattern is joined to the prefix.
     #[must_use]
-    pub fn route(mut self, route: Route<I, R>) -> Self {
+    pub fn route(mut self, route: Route<I, R, E>) -> Self {
         self.routes.push(route);
         self
     }
@@ -381,7 +381,7 @@ impl<I: 'static, R> Group<I, R> {
     /// Adds a nested group; its prefix is joined to this one, and it takes
     /// this group's access when it declares none.
     #[must_use]
-    pub fn group(mut self, group: Group<I, R>) -> Self {
+    pub fn group(mut self, group: Group<I, R, E>) -> Self {
         let inherited = match &group.access {
             Access::Undeclared => self.access.clone(),
             a => a.clone(),
@@ -408,7 +408,7 @@ impl<I: 'static, R> Group<I, R> {
         self
     }
 
-    pub(crate) fn into_routes(self) -> impl Iterator<Item = Route<I, R>> {
+    pub(crate) fn into_routes(self) -> impl Iterator<Item = Route<I, R, E>> {
         let prefix = self.prefix;
         let access = self.access;
         let cors = self.cors;
@@ -429,7 +429,7 @@ impl<I: 'static, R> Group<I, R> {
     }
 }
 
-impl<I, R> std::fmt::Debug for Group<I, R> {
+impl<I, R, E: Render> std::fmt::Debug for Group<I, R, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Group")
             .field("prefix", &self.prefix)
