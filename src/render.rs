@@ -16,6 +16,11 @@ pub struct TemplateId(pub u32);
 
 /// A template engine.
 ///
+/// The view type is the engine's: an engine that reads any view through
+/// web-net's [`View`] trait (an adapter for a dynamic engine) uses
+/// `type View = dyn View`; an engine that compiles templates against the
+/// application's own types uses that type, and reads it directly.
+///
 /// ```
 /// use web_net::{Output, Render, RenderError, TemplateId, Value, View};
 ///
@@ -23,6 +28,7 @@ pub struct TemplateId(pub u32);
 /// struct TitleOnly;
 ///
 /// impl Render for TitleOnly {
+///     type View<'a> = dyn View + 'a;
 ///     fn template(&self, name: &str) -> Option<TemplateId> {
 ///         (name == "title").then_some(TemplateId(0))
 ///     }
@@ -36,6 +42,11 @@ pub struct TemplateId(pub u32);
 /// }
 /// ```
 pub trait Render: Send + Sync + 'static {
+    /// What a handler hands the engine, for any lifetime of the data it
+    /// borrows: `dyn View + 'a` for a dynamic engine, the application's own
+    /// type (`Page`, or `Page<'a>`) for a typed one.
+    type View<'a>: ?Sized;
+
     /// Resolves a template name. Called at build time for every template a
     /// route names, so an unknown name stops the application from starting.
     fn template(&self, name: &str) -> Option<TemplateId>;
@@ -49,9 +60,58 @@ pub trait Render: Send + Sync + 'static {
     fn render(
         &self,
         template: TemplateId,
-        view: &dyn View,
+        view: &Self::View<'_>,
         out: &mut Output<'_>,
     ) -> Result<(), RenderError>;
+
+    /// Writes the page for a refusal or an error, from the facts web-net
+    /// shows a visitor. `Ok(false)` (the default) leaves it to web-net's
+    /// built-in page; so does an error, which is not reported further.
+    ///
+    /// # Errors
+    ///
+    /// A [`RenderError`]; web-net then sends its built-in page.
+    fn error_page(&self, page: &ErrorPage<'_>, out: &mut Output<'_>) -> Result<bool, RenderError> {
+        let _ = (page, out);
+        Ok(false)
+    }
+}
+
+/// The engine of an application without one: `Cx::render` answers 500
+/// `render.no_engine`, and error pages are web-net's own.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoRender;
+
+impl Render for NoRender {
+    type View<'a> = dyn View + 'a;
+
+    fn template(&self, _name: &str) -> Option<TemplateId> {
+        None
+    }
+
+    fn render(
+        &self,
+        _template: TemplateId,
+        _view: &(dyn View + '_),
+        _out: &mut Output<'_>,
+    ) -> Result<(), RenderError> {
+        Err(RenderError::new("render.no_engine"))
+    }
+}
+
+/// What an error page shows: the status, its generic title and message, and
+/// the request's reference. Never the code or the cause.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ErrorPage<'a> {
+    /// The status (`404`).
+    pub status: u16,
+    /// Its generic title (`Not Found`).
+    pub title: &'a str,
+    /// Its generic message.
+    pub message: &'a str,
+    /// The request's reference, as the visitor quotes it.
+    pub reference: &'a str,
 }
 
 /// A field or method of a view, resolved from a name by its [`Shape`].
@@ -268,6 +328,18 @@ impl<'a> Output<'a> {
     #[inline]
     pub fn write_str(&mut self, s: &str) -> Result<(), RenderError> {
         self.write(s.as_bytes())
+    }
+
+    /// The buffer itself, for an engine that writes into a `Vec<u8>`. The
+    /// budget is checked when the engine returns: a page past it is refused
+    /// with `render.too_large`.
+    pub fn buffer(&mut self) -> &mut Vec<u8> {
+        self.buf
+    }
+
+    /// Whether the budget was passed (checked after the engine returns).
+    pub(crate) fn over(&self) -> bool {
+        self.buf.len() > self.limit
     }
 
     /// Bytes written so far.

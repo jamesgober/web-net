@@ -647,6 +647,8 @@ fn test_hooks_run_for_their_routes_only() {
 struct Mini;
 
 impl Render for Mini {
+    type View<'a> = dyn View + 'a;
+
     fn template(&self, name: &str) -> Option<TemplateId> {
         match name {
             "page" => Some(TemplateId(0)),
@@ -658,7 +660,7 @@ impl Render for Mini {
     fn render(
         &self,
         t: TemplateId,
-        view: &dyn View,
+        view: &(dyn View + '_),
         out: &mut Output<'_>,
     ) -> Result<(), RenderError> {
         let field = |name| view.shape().key(name).map(|k| view.get(k));
@@ -689,20 +691,20 @@ fn test_render_through_the_view() {
         .page_limit(64)
         .route(
             get("/", |cx| {
-                cx.render(&web_net::Fields(&[("title", Value::Text("Hi <you>"))]))
+                cx.render_view(&web_net::Fields(&[("title", Value::Text("Hi <you>"))]))
             })
             .public()
             .template("page"),
         )
         .route(
-            get("/broken", |cx| cx.render(&web_net::Fields(&[])))
+            get("/broken", |cx| cx.render_view(&web_net::Fields(&[])))
                 .public()
                 .template("page"),
         )
         .route(
             get("/big", |cx| {
                 let t = "x".repeat(100);
-                cx.render(&web_net::Fields(&[("title", Value::Text(&t))]))
+                cx.render_view(&web_net::Fields(&[("title", Value::Text(&t))]))
             })
             .public()
             .template("page"),
@@ -742,7 +744,7 @@ fn test_checkpoint_stops_render() {
         .checkpoint(Revoke)
         .route(
             get("/", |cx| {
-                cx.render(&web_net::Fields(&[("title", Value::Text("x"))]))
+                cx.render_view(&web_net::Fields(&[("title", Value::Text("x"))]))
             })
             .public()
             .template("page"),

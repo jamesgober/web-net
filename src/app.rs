@@ -24,17 +24,12 @@ use crate::route::{Access, BoxHandler, Group, Route};
 use crate::router::{self, Captures, Trie};
 use crate::url::{self, TrailingSlash};
 use crate::{
-    Cx, Denial, DenialKind, Event, EventKind, Events, Fields, Gate, Identity, NoEvents, Open,
-    Output, Render, Request, RequestId, Result, Stage, TemplateId, Value,
+    Cx, Denial, DenialKind, ErrorPage, Event, EventKind, Events, Gate, Identity, NoEvents, NoRender,
+    Open, Output, Render, Request, RequestId, Result, Stage, TemplateId,
 };
 
 /// The default budget for one rendered page.
 pub const DEFAULT_PAGE_LIMIT: usize = 8 << 20;
-
-/// Statuses with an error template lookup (`error/404`, ...).
-const ERROR_STATUSES: [u16; 14] = [
-    400, 401, 403, 404, 405, 409, 410, 413, 421, 422, 429, 500, 501, 503,
-];
 
 /// A named point in the pipeline where registered code runs, only for the
 /// routes it registered for. A route with no hooks pays nothing.
@@ -97,7 +92,7 @@ impl Routes {
     }
 }
 
-pub(crate) type HookFn<I> = Arc<dyn Fn(&mut Cx<'_, I>) -> Result + Send + Sync>;
+pub(crate) type HookFn<I, E> = Arc<dyn Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync>;
 
 /// What [`App::classify`] tells a dispatcher before admission.
 #[non_exhaustive]
@@ -115,13 +110,12 @@ pub struct Classified {
 pub struct RouteId(pub u32);
 
 /// The parts of the application every handler can reach.
-pub(crate) struct Shared {
-    pub(crate) render: Option<Box<dyn Render>>,
+pub(crate) struct Shared<E: Render> {
+    pub(crate) render: Option<E>,
     pub(crate) checkpoint: Option<Box<dyn crate::Checkpoint>>,
     pub(crate) events: Box<dyn Events>,
     pub(crate) page_limit: usize,
     pub(crate) base: Box<str>,
-    errors: Vec<(u16, TemplateId)>,
     sign_in: Option<Box<str>>,
     challenge: Box<str>,
     wipe: bool,
@@ -160,8 +154,8 @@ struct Site {
     https_only: bool,
 }
 
-struct Entry<G: Gate> {
-    handler: BoxHandler<G::Identity>,
+struct Entry<G: Gate, E: Render> {
+    handler: BoxHandler<G::Identity, E>,
     access: Access<G::Rule>,
     names: Box<[Box<str>]>,
     pattern: Box<str>,
@@ -173,9 +167,9 @@ struct Entry<G: Gate> {
     cache: CachePolicy,
     /// `Cache-Control` for guests and for signed-in visitors, made once.
     cache_values: (Option<Box<str>>, Option<Box<str>>),
-    routed: Box<[HookFn<G::Identity>]>,
-    finish: Box<[HookFn<G::Identity>]>,
-    before_render: Box<[HookFn<G::Identity>]>,
+    routed: Box<[HookFn<G::Identity, E>]>,
+    finish: Box<[HookFn<G::Identity, E>]>,
+    before_render: Box<[HookFn<G::Identity, E>]>,
 }
 
 struct Endpoint {
@@ -213,13 +207,13 @@ struct Endpoint {
 /// assert_eq!(reply.header("location"), Some(&b"/users/7"[..]));
 /// # Ok::<(), web_net::BuildError>(())
 /// ```
-pub struct App<G: Gate = Open> {
+pub struct App<G: Gate = Open, E: Render = NoRender> {
     gate: G,
-    shared: Shared,
+    shared: Shared<E>,
     site: Site,
     trie: Trie,
     endpoints: Vec<Endpoint>,
-    entries: Vec<Entry<G>>,
+    entries: Vec<Entry<G, E>>,
     allow_all: Box<str>,
     assets: Vec<Assets>,
     health: Vec<(Box<str>, Health)>,
@@ -242,15 +236,29 @@ impl<G: Gate> App<G> {
     }
 }
 
+impl<G: Gate, E: Render> App<G, E> {
+    /// A builder with `gate` and a template engine. Handlers render with
+    /// [`Cx::render`](crate::Cx::render) and the engine's view type (the
+    /// application's own type for a typed engine), or with
+    /// [`Cx::render_view`](crate::Cx::render_view) for an engine that reads
+    /// any [`View`].
+    #[must_use]
+    pub fn with(gate: G, engine: E) -> Builder<G, E> {
+        let mut b = Builder::new(gate);
+        b.render = Some(engine);
+        b
+    }
+}
+
 /// Declares an application. Every mistake is reported by
 /// [`build`](Self::build) at once, before anything listens.
-pub struct Builder<G: Gate> {
+pub struct Builder<G: Gate, E: Render = NoRender> {
     gate: G,
-    routes: Vec<Route<G::Identity, G::Rule>>,
-    hooks: Vec<(Hook, Routes, HookFn<G::Identity>)>,
+    routes: Vec<Route<G::Identity, G::Rule, E>>,
+    hooks: Vec<(Hook, Routes, HookFn<G::Identity, E>)>,
     site: Site,
     base: String,
-    render: Option<Box<dyn Render>>,
+    render: Option<E>,
     checkpoint: Option<Box<dyn crate::Checkpoint>>,
     events: Box<dyn Events>,
     page_limit: usize,
@@ -263,9 +271,11 @@ pub struct Builder<G: Gate> {
     csrf: Option<csrf_sec::Csrf>,
     redirect_hosts: Vec<Box<str>>,
     compression: Option<Compression>,
+    /// Problems found before `build` (an engine set after routes).
+    early: Vec<Problem>,
 }
 
-impl<G: Gate> Builder<G> {
+impl<G: Gate, E: Render> Builder<G, E> {
     fn new(gate: G) -> Self {
         Self {
             gate,
@@ -286,6 +296,7 @@ impl<G: Gate> Builder<G> {
             csrf: None,
             redirect_hosts: Vec::new(),
             compression: None,
+            early: Vec::new(),
         }
     }
 
@@ -356,14 +367,14 @@ impl<G: Gate> Builder<G> {
 
     /// Adds a route.
     #[must_use]
-    pub fn route(mut self, route: Route<G::Identity, G::Rule>) -> Self {
+    pub fn route(mut self, route: Route<G::Identity, G::Rule, E>) -> Self {
         self.routes.push(route);
         self
     }
 
     /// Adds a group's routes.
     #[must_use]
-    pub fn group(mut self, group: Group<G::Identity, G::Rule>) -> Self {
+    pub fn group(mut self, group: Group<G::Identity, G::Rule, E>) -> Self {
         self.routes.extend(group.into_routes());
         self
     }
@@ -372,7 +383,7 @@ impl<G: Gate> Builder<G> {
     #[must_use]
     pub fn hook<F>(mut self, hook: Hook, routes: Routes, f: F) -> Self
     where
-        F: Fn(&mut Cx<'_, G::Identity>) -> Result + Send + Sync + 'static,
+        F: Fn(&mut Cx<'_, G::Identity, E>) -> Result + Send + Sync + 'static,
     {
         self.hooks.push((hook, routes, Arc::new(f)));
         self
@@ -453,12 +464,7 @@ impl<G: Gate> Builder<G> {
         self
     }
 
-    /// The template engine.
-    #[must_use]
-    pub fn render(mut self, engine: impl Render) -> Self {
-        self.render = Some(Box::new(engine));
-        self
-    }
+
 
     /// Where refusals, denials, and failures are reported.
     #[must_use]
@@ -497,8 +503,8 @@ impl<G: Gate> Builder<G> {
     /// A [`BuildError`] listing every problem: a route without declared
     /// access, a malformed pattern, two handlers for one method of one
     /// path, an unknown template, a malformed host or base path.
-    pub fn build(self) -> std::result::Result<App<G>, BuildError> {
-        let mut problems = Vec::new();
+    pub fn build(self) -> std::result::Result<App<G, E>, BuildError> {
+        let mut problems = self.early;
         let mut problem = |subject: &str, message: String| {
             problems.push(Problem {
                 subject: subject.to_owned(),
@@ -593,20 +599,10 @@ impl<G: Gate> Builder<G> {
             health.push((p.into_boxed_str(), h));
         }
 
-        // Error templates.
-        let mut errors = Vec::new();
-        if let Some(r) = &self.render {
-            for s in ERROR_STATUSES {
-                if let Some(t) = r.template(&format!("error/{s}")) {
-                    errors.push((s, t));
-                }
-            }
-        }
-
         // Routes.
         let mut trie = Trie::default();
         let mut endpoints: Vec<Endpoint> = Vec::new();
-        let mut entries: Vec<Entry<G>> = Vec::new();
+        let mut entries: Vec<Entry<G, E>> = Vec::new();
         let mut all = MethodSet::EMPTY;
         for r in self.routes {
             let parts = match router::parse(&r.pattern) {
@@ -684,7 +680,7 @@ impl<G: Gate> Builder<G> {
                         "an unsafe method needs CSRF protection; set Builder::csrf(..) or mark the route csrf_exempt(\"reason\")".into(),
                     );
                 }
-                let pick = |at: Hook| -> Box<[HookFn<G::Identity>]> {
+                let pick = |at: Hook| -> Box<[HookFn<G::Identity, E>]> {
                     self.hooks
                         .iter()
                         .filter(|(h, sel, _)| *h == at && sel.matches(&r.pattern, r.name))
@@ -750,7 +746,6 @@ impl<G: Gate> Builder<G> {
                 events: self.events,
                 page_limit: self.page_limit,
                 base: base.into(),
-                errors,
                 sign_in: self.sign_in.map(Into::into),
                 challenge: self.challenge.into(),
                 wipe: self.wipe,
@@ -770,7 +765,39 @@ impl<G: Gate> Builder<G> {
     }
 }
 
-impl<G: Gate> fmt::Debug for Builder<G> {
+impl<G: Gate> Builder<G, NoRender> {
+    /// The template engine. Set it before adding routes and hooks: their
+    /// handlers are typed by it, so any added before are dropped and the
+    /// build says so.
+    #[must_use]
+    pub fn render<E: Render>(self, engine: E) -> Builder<G, E> {
+        let mut b = Builder::new(self.gate);
+        if !self.routes.is_empty() || !self.hooks.is_empty() {
+            b.early.push(Problem {
+                subject: "render".into(),
+                message: "set the template engine before adding routes and hooks (or use App::with)".into(),
+            });
+        }
+        b.render = Some(engine);
+        b.site = self.site;
+        b.base = self.base;
+        b.checkpoint = self.checkpoint;
+        b.events = self.events;
+        b.page_limit = self.page_limit;
+        b.sign_in = self.sign_in;
+        b.challenge = self.challenge;
+        b.wipe = self.wipe;
+        b.security = self.security;
+        b.assets = self.assets;
+        b.health = self.health;
+        b.csrf = self.csrf;
+        b.redirect_hosts = self.redirect_hosts;
+        b.compression = self.compression;
+        b
+    }
+}
+
+impl<G: Gate, E: Render> fmt::Debug for Builder<G, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Builder")
             .field("routes", &self.routes)
@@ -853,7 +880,7 @@ enum Placed<'a> {
     Refuse(u16, &'static str, Option<url::UrlError>),
 }
 
-impl<G: Gate> App<G> {
+impl<G: Gate, E: Render> App<G, E> {
     /// Runs the whole pipeline for one request, authentication included.
     pub fn respond(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
         self.serve(req, env, None, reply).outcome
@@ -1424,7 +1451,7 @@ impl<G: Gate> App<G> {
     #[allow(clippy::too_many_arguments)]
     fn handle(
         &self,
-        entry: &Entry<G>,
+        entry: &Entry<G, E>,
         req: Request<'_>,
         who: &G::Identity,
         caps: Captures,
@@ -1678,19 +1705,16 @@ impl<G: Gate> App<G> {
             return;
         }
         let mut done = false;
-        if let (Some(engine), Some(&(_, t))) = (
-            self.shared.render.as_deref(),
-            self.shared.errors.iter().find(|(s, _)| *s == status),
-        ) {
-            let fields = [
-                ("status", Value::Int(i64::from(status))),
-                ("title", Value::Text(error::title(status))),
-                ("message", Value::Text(error::message(status))),
-                ("reference", Value::Text(&reference)),
-            ];
-            let view = Fields(&fields);
+        if let Some(engine) = self.shared.render.as_ref() {
+            let page = ErrorPage {
+                status,
+                title: error::title(status),
+                message: error::message(status),
+                reference: &reference,
+            };
             let mut out = Output::new(&mut body, self.shared.page_limit);
-            if engine.render(t, &view, &mut out).is_ok() {
+            let wrote = engine.error_page(&page, &mut out);
+            if matches!(wrote, Ok(true)) && !out.over() {
                 done = true;
             } else {
                 body.clear();
@@ -1751,13 +1775,13 @@ impl<G: Gate> App<G> {
     }
 }
 
-impl<G: Gate> HttpService for App<G> {
+impl<G: Gate, E: Render> HttpService for App<G, E> {
     fn call(&self, request: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
         self.respond(request, env, reply)
     }
 }
 
-impl<G: Gate> fmt::Debug for App<G> {
+impl<G: Gate, E: Render> fmt::Debug for App<G, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("App")
             .field("site", &self.site)

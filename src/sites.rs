@@ -3,7 +3,7 @@
 
 use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
 
-use crate::{App, Gate, Open, Served};
+use crate::{App, Gate, NoRender, Open, Render, Served};
 
 /// A table of applications, chosen per request by host and base path: an
 /// application that lists the request's host (or an alias of it) wins over
@@ -37,17 +37,17 @@ use crate::{App, Gate, Open, Served};
 /// assert_eq!(respond(&sites, b"GET / HTTP/1.1\r\nHost: other.example\r\n\r\n").status, 421);
 /// # Ok::<(), web_net::BuildError>(())
 /// ```
-pub struct Sites<G: Gate = Open> {
-    apps: Vec<App<G>>,
+pub struct Sites<G: Gate = Open, E: Render = NoRender> {
+    apps: Vec<App<G, E>>,
 }
 
-impl<G: Gate> Default for Sites<G> {
+impl<G: Gate, E: Render> Default for Sites<G, E> {
     fn default() -> Self {
         Self { apps: Vec::new() }
     }
 }
 
-impl<G: Gate> Sites<G> {
+impl<G: Gate, E: Render> Sites<G, E> {
     /// An empty table.
     #[must_use]
     pub fn new() -> Self {
@@ -57,14 +57,14 @@ impl<G: Gate> Sites<G> {
     /// Adds an application. The first one added answers what no other
     /// claims.
     #[must_use]
-    pub fn site(mut self, app: App<G>) -> Self {
+    pub fn site(mut self, app: App<G, E>) -> Self {
         self.apps.push(app);
         self
     }
 
     /// The application for a request, if the table has any.
     #[must_use]
-    pub fn pick(&self, req: &HttpRequest<'_>) -> Option<&App<G>> {
+    pub fn pick(&self, req: &HttpRequest<'_>) -> Option<&App<G, E>> {
         let authority = req.head().authority();
         let path = req.path();
         self.apps
@@ -97,13 +97,13 @@ impl<G: Gate> Sites<G> {
     }
 }
 
-impl<G: Gate> HttpService for Sites<G> {
+impl<G: Gate, E: Render> HttpService for Sites<G, E> {
     fn call(&self, request: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
         self.serve(request, env, None, reply).outcome
     }
 }
 
-impl<G: Gate> std::fmt::Debug for Sites<G> {
+impl<G: Gate, E: Render> std::fmt::Debug for Sites<G, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sites").field("apps", &self.apps).finish()
     }
