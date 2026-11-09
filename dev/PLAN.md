@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) &rarr; [`DIRECTIVES.md`](./DIRECTIVES.md) &rarr; **this file** &rarr; [`ROADMAP.md`](./ROADMAP.md).
 >
-> **Status:** `0.4.0`, actions: forms, uploads, CSRF. Static files at `0.3.0`; core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
+> **Status:** `0.5.0`: negotiation, CORS, compression, caching, several sites. Actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
 
 ---
 
@@ -73,7 +73,7 @@ One fixed path. Each step answers or hands on; nothing runs that the request doe
 | 11 | hooks `Finish` | the hook's error | add headers |
 | 12 | finish | 500 for an invalid field | the reply is copied to serve-net; `x-content-type-options: nosniff` and the security headers, except fields the handler set |
 
-Still to come on this path (roadmap): the cache fast path after authorize (0.5). The handler's own conditional fast path is `Cx::not_modified` (0.3).
+The cache fast path for guests sits in front of web-net: `App::serve` reports whether a reply may be kept (section 12.4). The handler's own conditional fast path is `Cx::not_modified` (0.3).
 
 Why authentication runs before routing: a ban, an expired session, or a forged token is caught before any route code or route lookup, and the router never needs to know about credentials. The cost is one gate call for requests that end in 404; a gate keeps that cheap (an in-memory session lookup).
 
@@ -220,11 +220,12 @@ pub trait View {
 | actions | 0.4 (done) | the accepted form answers 303 (`see_other`), the refused one renders again with 422 from the `FormError` the handler got |
 | external redirects | 0.4 (done) | `Builder::redirect_hosts` and `Cx::redirect_external`: `https://` or `http://`, a listed host, no user information, visible ASCII |
 | preconditions | 0.4 (done) | `Cx::precondition(tag, modified)`: `If-Match` (strong) and `If-Unmodified-Since` answer 412 before an unsafe request changes anything |
-| negotiation | 0.5 | `Accept` (HTML or JSON error replies), `Accept-Language` locale |
-| CORS | 0.5 | per group; preflight answered |
-| compression | 0.5 | compress-lib, for direct deployments (a proxy in front usually compresses) |
-| caching | 0.5 | `CachePolicy` per route; a cacheability report from `respond_identified` so a cache in front can store guest pages; a per-variant cache seam |
-| several sites | 0.5 | a site table choosing the app by host and base path |
+| negotiation | 0.5 (done) | error replies in JSON when `Accept` prefers `application/json` to `text/html` (same facts as the page); `Cx::language(offers)` and `Cx::media(offers)` |
+| CORS | 0.5 (done) | section 12.5 |
+| compression | 0.5 (done) | `Builder::compress(Compression)`: gzip through compress-lib for compressible types over a minimum size (1 KiB), only when the client accepts gzip and only when it is smaller; `Vary: accept-encoding` on every compressible reply once enabled. Off by default (a proxy usually compresses). Brotli for dynamic replies waits for an encoder in compress-lib; static files have precompressed `.br` |
+| caching | 0.5 (done) | section 12.4 |
+| several sites | 0.5 (done) | `Sites`: the application that lists the request's host (or an alias) beats one that answers any host; then the longest base path holding the path; otherwise the first added answers by its own rules (421, 404) |
+| before-render hook | 0.5 (done) | `Hook::BeforeRender`, inside `Cx::render` before the engine; a hook that renders does not run the hooks again |
 
 ### 12.1 Static files
 
@@ -276,6 +277,29 @@ Every unsafe method (`POST`, `PUT`, `PATCH`, `DELETE`) on a route that is not ex
 
 Cost [est., csrf-sec's own measurements]: about 110 ns to verify a token and about 1 ns for the policy; a urlencoded form is parsed once more for its token (the same parser, bounded by the route's limits).
 
+### 12.4 Cache policy and the cacheability report
+
+`Route::cache(CachePolicy)` (or `Group::cache`) sets `Cache-Control` unless the handler set one:
+
+| Policy | Guest | Signed in |
+|---|---|---|
+| `Unset` (default) | nothing | nothing |
+| `NoStore` | `no-store` | `no-store` |
+| `Private { max_age }` | `private, max-age=N` | `private, max-age=N` |
+| `Public { max_age }` | `public, max-age=N` | `public, max-age=N` |
+| `Guests { max_age }` | `public, max-age=N` | `private, no-store` |
+
+`App::serve(req, env, who, reply) -> Served { outcome, route, cache }` tells a cache in front of web-net whether it may keep the reply for guests: `Cacheable::Guests { max_age }` only when the policy is `Guests` or `Public`, the request was a guest's `GET` or `HEAD`, the status is 200, the reply sets no cookie, and it varies on nothing but `Accept-Encoding`. Everything else is `Cacheable::No`. The cache keys and invalidates on its own terms; web-net only says what is safe to keep.
+
+### 12.5 CORS
+
+`Cors` (on a route or a group): exact origins, or `any_origin()` (answered `*`, never with credentials: the build refuses the pair), allowed request fields, exposed reply fields, credentials, preflight lifetime. Every policy is checked at build (an origin is `scheme://host[:port]` with no path; field names are tokens).
+
+- A preflight (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) for a route with a policy is answered before the gate (preflights carry no credentials): 204 with `Access-Control-Allow-Origin`, `-Methods` (the path's), `-Headers`, `-Credentials`, `-Max-Age`, `Vary: origin` when the origin, the method, and every requested field are allowed; 204 without them otherwise, and a `cors.denied` event.
+- Replies of a route with a policy carry `Vary: origin`, and, for an allowed origin, `Access-Control-Allow-Origin` (`-Credentials`, `-Expose-Headers`).
+- Routes without a policy never answer with CORS fields.
+- CORS is not authentication and does not lift CSRF: an origin allowed for unsafe methods must also be allowed in csrf-sec's builder (`allow_origin`), or the client sends the token in `X-CSRF-Token`.
+
 ---
 
 ## 13. Threats
@@ -298,6 +322,9 @@ Cost [est., csrf-sec's own measurements]: about 110 ns to verify a token and abo
 | directory traversal in static files | canonical path, segment rules, resolved path checked against the root | 0.3 (done) |
 | hidden and special files | dot files, alternate data streams, trailing dots and spaces, device names refused | 0.3 (done) |
 | protocol downgrade | HSTS on HTTPS replies | 0.3 (done) |
+| cross-origin reads | no CORS fields without a declared policy; `*` never with credentials | 0.5 (done) |
+| shared caches serving personal pages | `Guests` policy is private for signed-in visitors; the report never marks a reply with a cookie or a signed-in visitor as keepable | 0.5 (done) |
+| compression side channels (BREACH) | compression off by default; csrf-sec masks tokens per reply | 0.5 (done) |
 | resource exhaustion | serve-net's limits; web-net's page budget, segment limit (256), parameter limit (8), field limit (64) | 0.2 |
 
 Every row has an attack test by 0.7.
@@ -313,6 +340,9 @@ src/
   assets.rs    static files: resolution, validators, ranges, variants, parts, MIME
   headers.rs   SecurityHeaders
   csrf.rs      the CSRF step and the form token check
+  cors.rs      Cors: preflights and reply fields
+  policy.rs    CachePolicy, Cacheable, Served, Compression
+  sites.rs     Sites: several applications by host and base path
   url.rs       normalization, canonical encoding, TrailingSlash
   router.rs    pattern parsing, the segment trie, captures
   gate.rs      Identity, Gate, Denial, Open, Guest
@@ -335,7 +365,7 @@ src/
 | parse-net 0.9.2 | 0.3 | entity tags, HTTP dates, `Range` and `If-Range`, `Accept-Encoding`; later `Accept` and media types |
 | form-net 0.9 | 0.4 | forms and uploads (re-exported) |
 | csrf-sec 0.9.3 | 0.4 | CSRF tokens and origin policy (re-exported) |
-| compress-lib 0.9 | 0.5 | response compression |
+| compress-lib 0.9 | 0.5 | gzip for replies (`Builder::compress`) |
 
 No third-party runtime dependency. First-party crates at published versions only. No template engine: engines depend on web-net, not the other way round.
 
@@ -420,3 +450,9 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-033 | 2026-11-08 | External redirects only to allowlisted hosts, never with user information | open redirects stay impossible |
 | D-034 | 2026-11-08 | Preconditions (`If-Match`, `If-Unmodified-Since`) are checked by the handler through `Cx::precondition` | only the handler knows the current version of what it changes |
 | D-035 | 2026-11-08 | form-net and csrf-sec are re-exported | one version of each in an application, and `form!` works through `web_net::form_net` |
+| D-036 | 2026-11-08 | Error replies are JSON when the client prefers it | API clients get the same facts in a form they read; still no detail |
+| D-037 | 2026-11-08 | CORS is declared per route or group, preflights are answered before the gate, and nothing without a policy answers with CORS fields | relaxing the same-origin rule is a decision per route, never a default |
+| D-038 | 2026-11-08 | Dynamic compression is gzip only, off by default, and only kept when smaller | compress-lib has no Brotli encoder; most deployments compress in front; never make a reply bigger |
+| D-039 | 2026-11-08 | `CachePolicy` per route; `App::serve` reports whether a guest's reply may be kept by a cache in front | the front cache can skip the application for guests without ever keeping a personal page |
+| D-040 | 2026-11-08 | `Sites` prefers a listed host, then the longest base | a folder site and a root site on one host each get their own paths |
+| D-041 | 2026-11-08 | `Hook::BeforeRender` added; no after-response hook | after-response work (access logs, analytics) belongs to serve-net's observer and web-net's events, off the request path |

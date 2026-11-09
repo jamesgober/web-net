@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party runtime dependencies.
     </p>
     <blockquote>
-        <strong>Status: <code>0.4.0</code>.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
+        <strong>Status: <code>0.5.0</code>.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
     </blockquote>
 </div>
 
@@ -40,7 +40,7 @@
 
 ```toml
 [dependencies]
-web-net = "0.4"
+web-net = "0.5"
 serve-net = "0.7"
 ```
 
@@ -98,7 +98,9 @@ Built in: static files (`Assets`: validators, ranges, precompressed variants, no
 
 Forms and uploads through form-net (`Cx::form`, `Cx::upload`), CSRF through csrf-sec on every unsafe method (origin policy and a session-bound token; a route without either does not build unless it is exempt with a reason), allowlisted external redirects, and `If-Match` preconditions.
 
-Coming next (see the roadmap): negotiation, CORS, compression, caching, and several sites (0.5).
+Negotiation (JSON error replies, `Cx::language`), CORS per route or group, gzip compression, cache policies with a report a cache in front can trust (`App::serve`), and several sites in one table (`Sites`).
+
+Coming next (see the roadmap): benchmarks and the allocation-free hot path (0.6), hardening and fuzzing (0.7).
 
 <hr>
 <br>

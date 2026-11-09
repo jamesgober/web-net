@@ -65,6 +65,7 @@ pub struct Request<'r> {
     pub(crate) host: &'r str,
     pub(crate) route: Option<&'r str>,
     pub(crate) tls: bool,
+    pub(crate) json: bool,
 }
 
 impl<'r> Request<'r> {

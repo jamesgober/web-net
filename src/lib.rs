@@ -70,25 +70,30 @@
 
 mod app;
 mod assets;
+mod cors;
 mod csrf;
 mod cx;
 mod error;
 mod events;
 mod gate;
 mod headers;
+mod policy;
 mod render;
 mod request;
 mod route;
 mod router;
+mod sites;
 mod url;
 
 pub use app::{App, Builder, Classified, DEFAULT_PAGE_LIMIT, Hook, RouteId, Routes};
 pub use assets::{Assets, INLINE_LIMIT, mime_for};
+pub use cors::Cors;
 pub use cx::Cx;
 pub use error::{BuildError, Error, Problem, Result};
 pub use events::{Checkpoint, Event, EventKind, Events, NoEvents, Stage};
 pub use gate::{Denial, DenialKind, Gate, Guest, Identity, NoRule, Open};
 pub use headers::{DEFAULT_CSP, SecurityHeaders};
+pub use policy::{CachePolicy, Cacheable, Compression, Served};
 pub use render::{
     Fields, Key, List, Output, Render, RenderError, SafeHtml, Shape, ShapeId, TemplateId, Value,
     View,
@@ -96,6 +101,7 @@ pub use render::{
 pub use request::{Ambiguous, Request, RequestId};
 pub use route::{Group, Handler, Route, delete, get, patch, post, put};
 pub use router::MAX_PARAMS;
+pub use sites::Sites;
 pub use url::{TrailingSlash, UrlError};
 
 /// cookie-net, at the version web-net uses, for [`Cx::set_cookie`].

@@ -1,6 +1,6 @@
 # web-net - API Reference
 
-> Every public item in `web-net`, with examples. Version `0.4.0`.
+> Every public item in `web-net`, with examples. Version `0.5.0`.
 > Design and reasons: [`../dev/PLAN.md`](../dev/PLAN.md).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
@@ -19,6 +19,7 @@
 - [Static files and health](#static-files-and-health)
 - [Security headers](#security-headers)
 - [Forms, uploads, CSRF](#forms-uploads-csrf)
+- [CORS, caching, compression, sites](#cors-caching-compression-sites)
 - [Events and checkpoints](#events-and-checkpoints)
 - [URL rules](#url-rules)
 - [Constants](#constants)
@@ -53,6 +54,7 @@ impl<G: Gate> App<G> {
     pub fn with_gate(gate: G) -> Builder<G>;
     pub fn respond(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome;
     pub fn respond_identified(&self, req: &HttpRequest<'_>, env: &Envelope, who: &G::Identity, reply: &mut HttpReply) -> Outcome;
+    pub fn serve(&self, req: &HttpRequest<'_>, env: &Envelope, who: Option<&G::Identity>, reply: &mut HttpReply) -> Served;
     pub fn classify(&self, head: &HttpHead<'_>) -> Classified;
     pub fn gate(&self) -> &G;
 }
@@ -90,6 +92,7 @@ impl<G: Gate> serve_net::HttpService for App<G>;
 | `security_headers(SecurityHeaders)` | the security headers on every reply |
 | `csrf(csrf_sec::Csrf)` | CSRF protection (required when a route takes an unsafe method and is not exempt) |
 | `redirect_hosts(&[&str])` | hosts `Cx::redirect_external` may send to |
+| `compress(Compression)` | gzip for compressible replies |
 | `build()` | `Result<App<G>, BuildError>` with every problem listed |
 
 ## Routes and groups
@@ -107,6 +110,8 @@ impl<I, R> Route<I, R> {
     pub fn template(self, name: &'static str) -> Self;
     pub fn csrf_exempt(self, reason: &'static str) -> Self;
     pub fn form_limits(self, limits: form_net::Limits) -> Self;
+    pub fn cors(self, cors: Cors) -> Self;
+    pub fn cache(self, policy: CachePolicy) -> Self;
 }
 impl<I, R> Group<I, R> {
     pub fn new(prefix: impl Into<String>) -> Self;
@@ -114,6 +119,8 @@ impl<I, R> Group<I, R> {
     pub fn allow(self, rule: R) -> Self;
     pub fn route(self, route: Route<I, R>) -> Self;
     pub fn group(self, group: Group<I, R>) -> Self;
+    pub fn cors(self, cors: Cors) -> Self;
+    pub fn cache(self, policy: CachePolicy) -> Self;
 }
 pub trait Handler<I>: Send + Sync + 'static { fn call(&self, cx: &mut Cx<'_, I>) -> Result; }
 ```
@@ -161,6 +168,8 @@ Named functions (`fn account(cx: &mut Cx<'_, User>) -> web_net::Result`) need no
 | `set_header(name, value)` | checked; a bad field or a framing field makes the reply a 500 |
 | `body_bytes(&[u8])`, `html(status, &str)`, `text(status, &str)` | the body |
 | `url(path) -> String` | the base path in front |
+| `language(offers) -> Option<&str>` | the best `Accept-Language` match |
+| `media(offers) -> Option<&str>` | the best `Accept` match |
 | `see_other(path) -> Result` | 303 to a site-relative path |
 | `redirect(status, path) -> Result` | 301, 302, 303, 307, 308 to a site-relative path |
 | `redirect_external(status, url) -> Result` | to a host from `redirect_hosts` only |
@@ -210,7 +219,7 @@ What gates and handlers read: `method()`, `path()` (canonical, inside the site),
 ## Hooks
 
 ```rust
-pub enum Hook { Routed, Finish }
+pub enum Hook { Routed, Finish, BeforeRender }
 impl Routes {
     pub fn all() -> Self;
     pub fn prefix(prefix: impl Into<String>) -> Self;   // segment-aware
@@ -340,6 +349,28 @@ let app = App::with_gate(G)
 
 The rules (binding, origin policy, where the token may come from, what is refused): PLAN section 12.3. Codes: `csrf.no_binding`, `csrf.missing`, `csrf.duplicate`, `csrf.unverified`, `csrf.unreadable_form`, `csrf.no_engine`, and csrf-sec's reasons as `csrf.<reason>` (`csrf.bad_mac`, `csrf.cross_site`, ...).
 
+## CORS, caching, compression, sites
+
+```rust
+impl Cors {
+    pub fn new() -> Self; pub fn origin(self, origin: &str) -> Self; pub fn any_origin(self) -> Self;
+    pub fn headers(self, names: &[&str]) -> Self; pub fn expose(self, names: &[&str]) -> Self;
+    pub fn credentials(self) -> Self; pub fn max_age(self, seconds: u32) -> Self;
+}
+pub enum CachePolicy { Unset, NoStore, Private { max_age: u32 }, Public { max_age: u32 }, Guests { max_age: u32 } }
+pub enum Cacheable { No, Guests { max_age: u32 } }
+pub struct Served { pub outcome: Outcome, pub route: Option<RouteId>, pub cache: Cacheable }
+impl Compression { pub fn min_bytes(self, bytes: usize) -> Self; pub fn level(self, level: u8) -> Self; }   // Default: 1024 bytes, level 6
+impl<G: Gate> Sites<G> {
+    pub fn new() -> Self; pub fn site(self, app: App<G>) -> Self;
+    pub fn pick(&self, req: &HttpRequest<'_>) -> Option<&App<G>>;
+    pub fn serve(&self, req, env, who: Option<&G::Identity>, reply) -> Served;
+}
+impl<G: Gate> serve_net::HttpService for Sites<G>;
+```
+
+Rules: PLAN sections 12, 12.4, 12.5.
+
 ## Events and checkpoints
 
 ```rust
@@ -354,7 +385,7 @@ pub trait Checkpoint: Send + Sync + 'static { fn check(&self, env: &Envelope, at
 pub enum Stage { Authorized, BeforeRender }
 ```
 
-Codes web-net reports: `url.not_absolute`, `url.bad_escape`, `url.encoded_slash`, `url.backslash`, `url.control`, `url.not_utf8`, `url.too_many_segments`, `url.asterisk`, `host.unknown`, `site.outside_base`, `route.none`, `assets.none`, `method.not_allowed`, `method.unknown`, `checkpoint.denied`, `checkpoint.killed`, `reply.invalid_field`, `handler.panic`, plus the gates' and handlers' own codes.
+Codes web-net reports: `url.not_absolute`, `url.bad_escape`, `url.encoded_slash`, `url.backslash`, `url.control`, `url.not_utf8`, `url.too_many_segments`, `url.asterisk`, `host.unknown`, `site.outside_base`, `route.none`, `assets.none`, `cors.denied`, `method.not_allowed`, `method.unknown`, `checkpoint.denied`, `checkpoint.killed`, `reply.invalid_field`, `handler.panic`, plus the gates' and handlers' own codes.
 
 ## URL rules
 

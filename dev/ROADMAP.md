@@ -40,13 +40,14 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - [x] `If-Match` / `If-Unmodified-Since` on unsafe methods (412), moved from 0.3.
 - The alpha routes' customs inspector is a test double here (`tests/actions.rs`), as in form-net: the real content inspector plugs into `form_inspected` when it exists. Running both routes for two weeks on a real site is form-net's and web-net's 0.8 alpha exit.
 
-## v0.5.0 - Negotiation, CORS, compression, caching, several sites
-- [ ] `Accept` for error replies (HTML or JSON); `Accept-Language` locale.
-- [ ] CORS per group; preflight.
-- [ ] Compression through compress-lib for direct deployments.
-- [ ] `CachePolicy` per route; cacheability report for a cache in front; per-variant cache seam.
-- [ ] A site table choosing the app by host and base path.
-- [ ] More hook points (before render, after the response through serve-net's `done`).
+## v0.5.0 - Negotiation, CORS, compression, caching, several sites (DONE, 2026-11-08)
+- [x] `Accept` for error replies (HTML or JSON); `Cx::language`, `Cx::media`.
+- [x] CORS per route and group; preflight.
+- [x] Compression through compress-lib for direct deployments (gzip).
+- [x] `CachePolicy` per route and group; `App::serve` and `Served` with the cacheability report for a cache in front.
+- [x] `Sites`: applications chosen by host and base path.
+- [x] `Hook::BeforeRender`.
+- Not done, with reasons (PLAN D-038, D-041): Brotli for dynamic replies (no encoder in compress-lib; revisit if one is added); an after-response hook (serve-net's observer and web-net's events cover it). A per-variant cache inside web-net is not planned: the report lets a cache in front do it, and keeping one in web-net would duplicate it.
 
 ## v0.6.0 - Performance
 - [ ] criterion benchmarks: normalization, lookup at 10,000 routes, pipeline overhead, error page; baselines recorded.

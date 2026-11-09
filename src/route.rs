@@ -105,6 +105,8 @@ pub struct Route<I, R> {
     pub(crate) template: Option<&'static str>,
     pub(crate) csrf_exempt: Option<&'static str>,
     pub(crate) form_limits: form_net::Limits,
+    pub(crate) cors: Option<Arc<crate::Cors>>,
+    pub(crate) cache: crate::CachePolicy,
 }
 
 impl<I: 'static, R> Route<I, R> {
@@ -120,6 +122,8 @@ impl<I: 'static, R> Route<I, R> {
             template: None,
             csrf_exempt: None,
             form_limits: form_net::Limits::DEFAULT,
+            cors: None,
+            cache: crate::CachePolicy::Unset,
         }
     }
 
@@ -229,6 +233,21 @@ impl<I: 'static, R> Route<I, R> {
         self
     }
 
+    /// The route's CORS policy: preflights answered, replies to allowed
+    /// origins readable by their scripts.
+    #[must_use]
+    pub fn cors(mut self, cors: crate::Cors) -> Self {
+        self.cors = Some(Arc::new(cors));
+        self
+    }
+
+    /// How the route's pages may be cached.
+    #[must_use]
+    pub fn cache(mut self, policy: crate::CachePolicy) -> Self {
+        self.cache = policy;
+        self
+    }
+
     /// The template [`Cx::render`](crate::Cx::render) uses. Resolved when the
     /// application is built: an unknown name stops the build.
     #[must_use]
@@ -307,6 +326,8 @@ pub struct Group<I, R> {
     pub(crate) prefix: String,
     pub(crate) access: Access<R>,
     pub(crate) routes: Vec<Route<I, R>>,
+    pub(crate) cors: Option<Arc<crate::Cors>>,
+    pub(crate) cache: crate::CachePolicy,
 }
 
 impl<I: 'static, R> Group<I, R> {
@@ -317,7 +338,23 @@ impl<I: 'static, R> Group<I, R> {
             prefix: prefix.into(),
             access: Access::Undeclared,
             routes: Vec::new(),
+            cors: None,
+            cache: crate::CachePolicy::Unset,
         }
+    }
+
+    /// The CORS policy of routes that declare none.
+    #[must_use]
+    pub fn cors(mut self, cors: crate::Cors) -> Self {
+        self.cors = Some(Arc::new(cors));
+        self
+    }
+
+    /// The cache policy of routes that declare none.
+    #[must_use]
+    pub fn cache(mut self, policy: crate::CachePolicy) -> Self {
+        self.cache = policy;
+        self
     }
 
     /// Routes without their own access are public.
@@ -349,10 +386,22 @@ impl<I: 'static, R> Group<I, R> {
             Access::Undeclared => self.access.clone(),
             a => a.clone(),
         };
+        let cors = group.cors.or_else(|| self.cors.clone());
+        let cache = if group.cache == crate::CachePolicy::Unset {
+            self.cache
+        } else {
+            group.cache
+        };
         for mut r in group.routes {
             r.pattern = join(&group.prefix, &r.pattern);
             if matches!(r.access, Access::Undeclared) {
                 r.access = inherited.clone();
+            }
+            if r.cors.is_none() {
+                r.cors.clone_from(&cors);
+            }
+            if r.cache == crate::CachePolicy::Unset {
+                r.cache = cache;
             }
             self.routes.push(r);
         }
@@ -362,10 +411,18 @@ impl<I: 'static, R> Group<I, R> {
     pub(crate) fn into_routes(self) -> impl Iterator<Item = Route<I, R>> {
         let prefix = self.prefix;
         let access = self.access;
+        let cors = self.cors;
+        let cache = self.cache;
         self.routes.into_iter().map(move |mut r| {
             r.pattern = join(&prefix, &r.pattern);
             if matches!(r.access, Access::Undeclared) {
                 r.access = access.clone();
+            }
+            if r.cors.is_none() {
+                r.cors.clone_from(&cors);
+            }
+            if r.cache == crate::CachePolicy::Unset {
+                r.cache = cache;
             }
             r
         })

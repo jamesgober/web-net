@@ -13,6 +13,29 @@
 
 ---
 
+## [0.5.0] - 2026-11-08
+
+Negotiation, CORS, compression, caching, and several sites.
+
+### Added
+
+- Error replies in JSON when `Accept` prefers `application/json`.
+  `Cx::language` and `Cx::media`.
+- `Cors` on routes and groups: preflights answered before the gate, reply
+  fields for allowed origins, `Vary: origin`; checked at build.
+- `Builder::compress(Compression)`: gzip through compress-lib.
+- `CachePolicy` on routes and groups (`NoStore`, `Private`, `Public`,
+  `Guests`). `App::serve` returning `Served { outcome, route, cache }` with
+  `Cacheable`.
+- `Sites`: several applications chosen by host and base path.
+- `Hook::BeforeRender`.
+
+### Dependencies
+
+- compress-lib 0.9 added.
+
+---
+
 ## [0.4.0] - 2026-11-08
 
 Actions: forms, uploads, and CSRF.
@@ -141,7 +164,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jamesgober/web-net/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamesgober/web-net/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamesgober/web-net/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/web-net/compare/v0.1.0...v0.2.0
