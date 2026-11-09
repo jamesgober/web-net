@@ -22,13 +22,14 @@ Exit: a site answers real requests on serve-net with canonical URLs, a router, 4
 - [x] Errors and events: one error function, built-in page, reference, `Events`, `Checkpoint`.
 - [x] Example on a real socket; pipeline tests in memory.
 
-## v0.3.0 - Static files and the finish step
+## v0.3.0 - Static files and the finish step (DONE, 2026-11-08)
 Exit: a site serves its assets and pages with correct caching and security headers.
-- [ ] Static mounts before routing: hardened joining (no escape from the root, symlinks checked), MIME by extension, `ETag`/`Last-Modified`, conditional requests (304, 412), single ranges (206, 416), precompressed `.br`/`.gz` variants, cache headers.
-- [ ] Health endpoints (liveness, readiness) before routing.
-- [ ] Security headers policy with defaults (CSP, frame, referrer, permissions, HSTS on HTTPS).
-- [ ] `Cx::set_cookie` through cookie-net; `Cx::not_modified(etag)` fast path.
-- [ ] parse-net for `If-None-Match`, `If-Modified-Since`, `Range`.
+- [x] Static mounts before routing: segment rules, resolved path inside the root, MIME by extension, `ETag`/`Last-Modified`, conditional requests (304), single ranges (206, 416), precompressed `.br`/`.gz` variants, cache headers, large files in parts.
+- [x] Health endpoints (liveness, readiness) before routing.
+- [x] Security headers policy with defaults (CSP, frame, referrer, permissions, opener, HSTS on HTTPS).
+- [x] `Cx::set_cookie` through cookie-net; `Cx::not_modified(tag)` fast path.
+- [x] parse-net for `If-None-Match`, `If-Modified-Since`, `Range`, `If-Range`, `Accept-Encoding`.
+- Moved to 0.4: `412 Precondition Failed` for `If-Match` and `If-Unmodified-Since` on unsafe methods. Reason: they protect state-changing requests, which arrive with the 0.4 actions; static files take `GET` and `HEAD` only.
 
 ## v0.4.0 - Actions: forms, uploads, CSRF
 Exit: a login form and an avatar upload run as form-net's alpha routes describe (`form-net/tests/alpha_routes.rs`), CSRF enforced.
@@ -36,6 +37,7 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - [ ] csrf-sec: origin policy and session-bound token on unsafe methods; opt-out only with a reason; the body is unreadable before the check passes.
 - [ ] Actions: 303 after an accepted form, 422 re-render with errors.
 - [ ] External redirect allowlist.
+- [ ] `If-Match` / `If-Unmodified-Since` on unsafe methods (412), moved from 0.3.
 
 ## v0.5.0 - Negotiation, CORS, compression, caching, several sites
 - [ ] `Accept` for error replies (HTML or JSON); `Accept-Language` locale.

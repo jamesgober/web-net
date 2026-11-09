@@ -13,6 +13,41 @@
 
 ---
 
+## [0.3.0] - 2026-11-08
+
+Static files and the finish step.
+
+### Added
+
+- `Assets` and `Builder::assets`: a folder served under a mount before the
+  gate and the router. Segments that file systems read specially are refused
+  on every platform (dot files, `:`, a trailing dot or space, `\`, Windows
+  device names); the resolved path must stay under the resolved root, so a
+  symbolic link cannot lead out. No listings; `index` file per mount.
+  Strong `ETag` and `Last-Modified`; `If-None-Match` and `If-Modified-Since`
+  answer 304; one byte range (206, 416), `If-Range`; precompressed `.br` and
+  `.gz` variants with `Vary`; `Cache-Control` per mount; files over 1 MiB sent
+  in 64 KiB parts. `mime_for`, `INLINE_LIMIT`.
+- `Builder::health` and `Builder::ready`: liveness and readiness paths
+  before the gate.
+- `SecurityHeaders` and `Builder::security_headers`: CSP, `X-Frame-Options`,
+  `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`, and
+  HSTS (HTTPS only, never for development hosts) on every reply, unless the
+  handler set the field. `DEFAULT_CSP`.
+- `Cx::set_cookie` (cookie-net `SetCookie`; `web_net::cookie_net`
+  re-exported) and `Cx::not_modified` (ETag and 304 for pages).
+
+### Changed
+
+- Every reply web-net sends now carries the default security headers. Use
+  `SecurityHeaders::none()` for the 0.2 behaviour.
+
+### Dependencies
+
+- parse-net 0.9.2 added.
+
+---
+
 ## [0.2.0] - 2026-11-08
 
 The core: a site answers real requests on serve-net. The plan is revised to
@@ -75,6 +110,7 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamesgober/web-net/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamesgober/web-net/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/web-net/releases/tag/v0.1.0

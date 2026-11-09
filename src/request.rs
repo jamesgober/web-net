@@ -64,6 +64,7 @@ pub struct Request<'r> {
     pub(crate) path: &'r str,
     pub(crate) host: &'r str,
     pub(crate) route: Option<&'r str>,
+    pub(crate) tls: bool,
 }
 
 impl<'r> Request<'r> {

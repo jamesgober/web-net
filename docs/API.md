@@ -1,6 +1,6 @@
 # web-net - API Reference
 
-> Every public item in `web-net`, with examples. Version `0.2.0`.
+> Every public item in `web-net`, with examples. Version `0.3.0`.
 > Design and reasons: [`../dev/PLAN.md`](../dev/PLAN.md).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
@@ -16,6 +16,8 @@
 - [Hooks](#hooks)
 - [Rendering](#rendering)
 - [Errors](#errors)
+- [Static files and health](#static-files-and-health)
+- [Security headers](#security-headers)
 - [Events and checkpoints](#events-and-checkpoints)
 - [URL rules](#url-rules)
 - [Constants](#constants)
@@ -81,6 +83,10 @@ impl<G: Gate> serve_net::HttpService for App<G>;
 | `checkpoint(impl Checkpoint)` | in-flight revocation at web-net's stages |
 | `page_limit(usize)` | budget for one rendered page (default `DEFAULT_PAGE_LIMIT`, 8 MiB) |
 | `wipe_buffers()` | zero the reused reply buffers after every request |
+| `assets(Assets)` | a folder served under a mount, before the gate |
+| `health(&str)` | a liveness path (`200 ok`) |
+| `ready(&str, Fn() -> bool)` | a readiness path (`200 ready` / `503 not ready`) |
+| `security_headers(SecurityHeaders)` | the security headers on every reply |
 | `build()` | `Result<App<G>, BuildError>` with every problem listed |
 
 ## Routes and groups
@@ -149,6 +155,8 @@ Named functions (`fn account(cx: &mut Cx<'_, User>) -> web_net::Result`) need no
 | `redirect(status, path) -> Result` | 301, 302, 303, 307, 308 to a site-relative path |
 | `render(&dyn View) -> Result` | the route's template |
 | `render_named(name, &dyn View) -> Result` | a template by name |
+| `set_cookie(&cookie_net::SetCookie)` | a `Set-Cookie` field |
+| `not_modified(tag) -> bool` | sets `ETag`; `true` (and 304) when `If-None-Match` matches |
 
 The reply is held by web-net until the handler returns; on an error or a panic it is discarded and the error page is sent instead.
 
@@ -246,6 +254,51 @@ pub struct BuildError;    // problems() -> &[Problem]
 pub struct Problem { pub subject: String, pub message: String }
 ```
 
+## Static files and health
+
+```rust
+impl Assets {
+    pub fn new(mount: &str, dir: impl Into<PathBuf>) -> Self;
+    pub fn cache_control(self, value: &str) -> Self;   // default "no-cache"
+    pub fn index(self, name: &str) -> Self;             // default none: folders are 404
+    pub fn precompressed(self, on: bool) -> Self;       // default on: file.br, file.gz
+    pub fn hidden_files(self, on: bool) -> Self;        // default off: .env etc. are 404
+}
+pub fn mime_for(path: &Path) -> &'static str;
+pub const INLINE_LIMIT: u64;   // 1 MiB: larger files go out in parts
+```
+
+```rust
+use web_net::{App, Assets};
+
+let app = App::builder()
+    .assets(Assets::new("/static", "./public").cache_control("public, max-age=31536000, immutable"))
+    .health("/healthz")
+    .ready("/readyz", || true)
+    .build()?;
+# Ok::<(), web_net::BuildError>(())
+```
+
+Rules (refused segments, validators, ranges, variants): PLAN section 12.1.
+
+## Security headers
+
+```rust
+impl SecurityHeaders {
+    pub fn none() -> Self;
+    pub fn content_security_policy(self, value: &str) -> Self;
+    pub fn no_content_security_policy(self) -> Self;
+    pub fn frame_options(self, value: &str) -> Self;
+    pub fn referrer_policy(self, value: &str) -> Self;
+    pub fn permissions_policy(self, value: &str) -> Self;
+    pub fn opener_policy(self, value: &str) -> Self;
+    pub fn hsts(self, max_age: u64, include_subdomains: bool) -> Self;
+    pub fn no_hsts(self) -> Self;
+}
+impl Default for SecurityHeaders;   // the strict defaults in PLAN section 12.2
+pub const DEFAULT_CSP: &str;
+```
+
 ## Events and checkpoints
 
 ```rust
@@ -260,7 +313,7 @@ pub trait Checkpoint: Send + Sync + 'static { fn check(&self, env: &Envelope, at
 pub enum Stage { Authorized, BeforeRender }
 ```
 
-Codes web-net reports: `url.not_absolute`, `url.bad_escape`, `url.encoded_slash`, `url.backslash`, `url.control`, `url.not_utf8`, `url.too_many_segments`, `url.asterisk`, `host.unknown`, `site.outside_base`, `route.none`, `method.not_allowed`, `method.unknown`, `checkpoint.denied`, `checkpoint.killed`, `reply.invalid_field`, `handler.panic`, plus the gates' and handlers' own codes.
+Codes web-net reports: `url.not_absolute`, `url.bad_escape`, `url.encoded_slash`, `url.backslash`, `url.control`, `url.not_utf8`, `url.too_many_segments`, `url.asterisk`, `host.unknown`, `site.outside_base`, `route.none`, `assets.none`, `method.not_allowed`, `method.unknown`, `checkpoint.denied`, `checkpoint.killed`, `reply.invalid_field`, `handler.panic`, plus the gates' and handlers' own codes.
 
 ## URL rules
 
@@ -271,3 +324,6 @@ Codes web-net reports: `url.not_absolute`, `url.bad_escape`, `url.encoded_slash`
 - `VERSION: &str`: the crate version.
 - `MAX_PARAMS: usize = 8`: parameters per route pattern.
 - `DEFAULT_PAGE_LIMIT: usize = 8 MiB`: the default page budget.
+- `INLINE_LIMIT: u64 = 1 MiB`: files up to this size are read whole.
+- `DEFAULT_CSP: &str`: the default content security policy.
+- `cookie_net`: the cookie-net crate, re-exported.
