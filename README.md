@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party runtime dependencies.
     </p>
     <blockquote>
-        <strong>Status: <code>0.3.0</code>.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
+        <strong>Status: <code>0.4.0</code>.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
     </blockquote>
 </div>
 
@@ -40,7 +40,7 @@
 
 ```toml
 [dependencies]
-web-net = "0.3"
+web-net = "0.4"
 serve-net = "0.7"
 ```
 
@@ -61,7 +61,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(Route::at("/contact")
             .get(|cx| { cx.html(200, "<form method=post></form>"); Ok(()) })
             .post(|cx| cx.see_other("/"))
-            .public())
+            .public()
+            // Unsafe methods need Builder::csrf(..) or an exemption with a reason.
+            .csrf_exempt("demo: the POST changes nothing"))
         .build()?;
 
     serve_net::Server::builder()
@@ -94,7 +96,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Built in: static files (`Assets`: validators, ranges, precompressed variants, no escape from the folder), health and readiness paths, strict security headers by default (`SecurityHeaders`), cookies out through cookie-net, and a 304 fast path for pages (`Cx::not_modified`).
 
-Coming next (see the roadmap): forms, uploads, and CSRF through form-net and csrf-sec (0.4); negotiation, CORS, compression, caching, and several sites (0.5).
+Forms and uploads through form-net (`Cx::form`, `Cx::upload`), CSRF through csrf-sec on every unsafe method (origin policy and a session-bound token; a route without either does not build unless it is exempt with a reason), allowlisted external redirects, and `If-Match` preconditions.
+
+Coming next (see the roadmap): negotiation, CORS, compression, caching, and several sites (0.5).
 
 <hr>
 <br>

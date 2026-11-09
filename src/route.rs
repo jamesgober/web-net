@@ -66,7 +66,10 @@ pub(crate) type BoxHandler<I> = Arc<dyn Handler<I>>;
 ///         Route::at("/contact")
 ///             .get(|cx| { cx.html(200, "<form method=post></form>"); Ok(()) })
 ///             .post(|cx| { cx.see_other("/contact/thanks") })
-///             .public(),
+///             .public()
+///             // A real form gets CSRF protection: Builder::csrf and a gate
+///             // whose identities carry a binding.
+///             .csrf_exempt("example: the POST changes nothing"),
 ///     )
 ///     .build()?;
 /// # Ok::<(), web_net::BuildError>(())
@@ -100,6 +103,8 @@ pub struct Route<I, R> {
     pub(crate) name: Option<&'static str>,
     pub(crate) work: WorkClass,
     pub(crate) template: Option<&'static str>,
+    pub(crate) csrf_exempt: Option<&'static str>,
+    pub(crate) form_limits: form_net::Limits,
 }
 
 impl<I: 'static, R> Route<I, R> {
@@ -113,6 +118,8 @@ impl<I: 'static, R> Route<I, R> {
             name: None,
             work: WorkClass::Quick,
             template: None,
+            csrf_exempt: None,
+            form_limits: form_net::Limits::DEFAULT,
         }
     }
 
@@ -200,6 +207,25 @@ impl<I: 'static, R> Route<I, R> {
     #[must_use]
     pub fn work(mut self, work: WorkClass) -> Self {
         self.work = work;
+        self
+    }
+
+    /// Takes the route out of CSRF protection, with the reason (a webhook
+    /// signed by its sender, an API authenticated by a bearer token that a
+    /// browser never sends on its own). The reason is required and must not
+    /// be empty: an exemption is a decision, never a default.
+    #[must_use]
+    pub fn csrf_exempt(mut self, reason: &'static str) -> Self {
+        self.csrf_exempt = Some(reason);
+        self
+    }
+
+    /// The budgets for reading this route's forms (field count, sizes, files;
+    /// default `form_net::Limits::DEFAULT`). Keep them to what the form
+    /// needs: they bound what one request can make the server hold.
+    #[must_use]
+    pub fn form_limits(mut self, limits: form_net::Limits) -> Self {
+        self.form_limits = limits;
         self
     }
 

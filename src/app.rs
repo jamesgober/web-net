@@ -14,6 +14,7 @@ use serve_net::{
 };
 
 use crate::assets::{self, Assets};
+use crate::csrf;
 use crate::cx::{Out, is_local_target};
 use crate::error::{self, BuildError, Problem};
 use crate::headers::SecurityHeaders;
@@ -21,8 +22,8 @@ use crate::route::{Access, BoxHandler, Group, Route};
 use crate::router::{self, Captures, Trie};
 use crate::url::{self, TrailingSlash};
 use crate::{
-    Cx, Denial, DenialKind, Event, EventKind, Events, Fields, Gate, NoEvents, Open, Output, Render,
-    Request, RequestId, Result, Stage, TemplateId, Value,
+    Cx, Denial, DenialKind, Event, EventKind, Events, Fields, Gate, Identity, NoEvents, Open,
+    Output, Render, Request, RequestId, Result, Stage, TemplateId, Value,
 };
 
 /// The default budget for one rendered page.
@@ -119,6 +120,8 @@ pub(crate) struct Shared {
     challenge: Box<str>,
     wipe: bool,
     security: SecurityHeaders,
+    pub(crate) csrf: Option<csrf_sec::Csrf>,
+    pub(crate) redirect_hosts: Vec<Box<str>>,
 }
 
 /// Where a reply is going: the request's envelope, and whether security
@@ -155,6 +158,8 @@ struct Entry<G: Gate> {
     pattern: Box<str>,
     work: WorkClass,
     template: Option<TemplateId>,
+    csrf: bool,
+    limits: form_net::Limits,
     routed: Box<[HookFn<G::Identity>]>,
     finish: Box<[HookFn<G::Identity>]>,
 }
@@ -240,6 +245,8 @@ pub struct Builder<G: Gate> {
     security: SecurityHeaders,
     assets: Vec<Assets>,
     health: Vec<(String, Health)>,
+    csrf: Option<csrf_sec::Csrf>,
+    redirect_hosts: Vec<Box<str>>,
 }
 
 impl<G: Gate> Builder<G> {
@@ -260,7 +267,31 @@ impl<G: Gate> Builder<G> {
             security: SecurityHeaders::default(),
             assets: Vec::new(),
             health: Vec::new(),
+            csrf: None,
+            redirect_hosts: Vec::new(),
         }
+    }
+
+    /// CSRF protection with csrf-sec (re-exported as
+    /// [`web_net::csrf_sec`](crate::csrf_sec)), built from a persisted
+    /// 32-byte key. Required as soon as one route takes an unsafe method and
+    /// is not [exempt](crate::Route::csrf_exempt).
+    #[must_use]
+    pub fn csrf(mut self, csrf: csrf_sec::Csrf) -> Self {
+        self.csrf = Some(csrf);
+        self
+    }
+
+    /// Hosts that [`Cx::redirect_external`] may send a visitor to
+    /// (`accounts.example.com`). Everything else is refused.
+    #[must_use]
+    pub fn redirect_hosts(mut self, hosts: &[&str]) -> Self {
+        self.redirect_hosts.extend(
+            hosts
+                .iter()
+                .map(|h| h.to_ascii_lowercase().into_boxed_str()),
+        );
+        self
     }
 
     /// Serves a folder of files under a mount path, before routing and
@@ -517,6 +548,14 @@ impl<G: Gate> Builder<G> {
                 }
             }
         }
+        for h in &self.redirect_hosts {
+            if !valid_host(h) {
+                problem(
+                    "redirect_hosts",
+                    format!("'{h}' is not a host name or address"),
+                );
+            }
+        }
         let mut health = Vec::new();
         for (p, h) in self.health {
             if !is_local_target(&p) || url::normalize(&p, false).map_or(true, |n| n != p) {
@@ -587,6 +626,12 @@ impl<G: Gate> Builder<G> {
                 });
             }
             let names: Box<[Box<str>]> = router::names(&parts).into();
+            if r.csrf_exempt.is_some_and(|reason| reason.trim().is_empty()) {
+                problem(&r.pattern, "a CSRF exemption needs its reason".into());
+            }
+            if let Err(e) = r.form_limits.validate() {
+                problem(&r.pattern, format!("the form limits are inconsistent: {e}"));
+            }
             for (m, h) in r.handlers {
                 let subject = format!("{} {}", m.as_str().unwrap_or("?"), r.pattern);
                 if m == Method::Other || m == Method::Connect || m == Method::Trace {
@@ -602,6 +647,13 @@ impl<G: Gate> Builder<G> {
                     continue;
                 }
                 *slot = Some(entries.len() as u32);
+                let csrf = r.csrf_exempt.is_none() && !m.is_safe();
+                if csrf && self.csrf.is_none() {
+                    problem(
+                        &subject,
+                        "an unsafe method needs CSRF protection; set Builder::csrf(..) or mark the route csrf_exempt(\"reason\")".into(),
+                    );
+                }
                 let pick = |at: Hook| -> Box<[HookFn<G::Identity>]> {
                     self.hooks
                         .iter()
@@ -616,6 +668,8 @@ impl<G: Gate> Builder<G> {
                     pattern: r.pattern.as_str().into(),
                     work: r.work,
                     template,
+                    csrf,
+                    limits: r.form_limits,
                     routed: pick(Hook::Routed),
                     finish: pick(Hook::Finish),
                 });
@@ -663,6 +717,8 @@ impl<G: Gate> Builder<G> {
                 challenge: self.challenge.into(),
                 wipe: self.wipe,
                 security: self.security,
+                csrf: self.csrf,
+                redirect_hosts: self.redirect_hosts,
             },
             site: self.site,
             trie,
@@ -1044,10 +1100,52 @@ impl<G: Gate> App<G> {
             }
         }
 
+        // CSRF on unsafe methods.
+        let binding = who.csrf_binding();
+        let csrf_state = match (&self.shared.csrf, entry.csrf) {
+            (Some(engine), true) => {
+                let scheme = if env.client().scheme() == Scheme::Https {
+                    "https://"
+                } else {
+                    "http://"
+                };
+                let own = format!("{scheme}{}", host_raw.to_ascii_lowercase());
+                match csrf::check(engine, http, binding, &own, &entry.limits) {
+                    Ok(s) => s,
+                    Err(code) => {
+                        self.refuse(403, code, EventKind::Denied, req.route, None, at, reply);
+                        return Outcome::Done;
+                    }
+                }
+            }
+            // Built only with an engine when a route needs one.
+            (None, true) => {
+                self.refuse(
+                    500,
+                    "csrf.no_engine",
+                    EventKind::Failed,
+                    req.route,
+                    None,
+                    at,
+                    reply,
+                );
+                return Outcome::Done;
+            }
+            (_, false) => csrf::State::Off,
+        };
+
         // The handler, with its hooks, on a buffer web-net holds.
         let mut out = SCRATCH.with(Cell::take).unwrap_or_default();
         out.reset();
-        let outcome = self.handle(entry, req, who, caps, &mut out, reply);
+        let outcome = self.handle(
+            entry,
+            req,
+            who,
+            caps,
+            (csrf_state, binding),
+            &mut out,
+            reply,
+        );
         if self.shared.wipe {
             out.wipe();
         }
@@ -1124,12 +1222,14 @@ impl<G: Gate> App<G> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle(
         &self,
         entry: &Entry<G>,
         req: Request<'_>,
         who: &G::Identity,
         caps: Captures,
+        (csrf_state, binding): (csrf::State, Option<&[u8]>),
         out: &mut Out,
         reply: &mut HttpReply,
     ) -> Outcome {
@@ -1138,7 +1238,7 @@ impl<G: Gate> App<G> {
             tls: req.tls,
         };
         let route = req.route;
-        let result = {
+        let (result, unverified) = {
             let mut cx = Cx {
                 req,
                 who,
@@ -1147,8 +1247,11 @@ impl<G: Gate> App<G> {
                 out: &mut *out,
                 shared: &self.shared,
                 template: entry.template,
+                csrf: csrf_state,
+                binding,
+                limits: &entry.limits,
             };
-            catch_unwind(AssertUnwindSafe(|| -> Result {
+            let result = catch_unwind(AssertUnwindSafe(|| -> Result {
                 for h in entry.routed.iter() {
                     h(&mut cx)?;
                 }
@@ -1157,9 +1260,25 @@ impl<G: Gate> App<G> {
                     h(&mut cx)?;
                 }
                 Ok(())
-            }))
+            }));
+            (result, cx.csrf == csrf::State::Pending)
         };
         match result {
+            Ok(Ok(())) if unverified => {
+                // A multipart route whose handler never read its form: the
+                // token was never checked, so nothing it wrote may leave.
+                out.reset();
+                self.refuse(
+                    403,
+                    "csrf.unverified",
+                    EventKind::Failed,
+                    route,
+                    None,
+                    at,
+                    reply,
+                );
+                Outcome::Done
+            }
             Ok(Ok(())) if !out.invalid => {
                 reply.status(out.status);
                 for &(ns, ne, vs, ve) in &out.spans {

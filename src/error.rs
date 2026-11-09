@@ -149,6 +149,13 @@ impl From<crate::Denial> for Error {
     }
 }
 
+impl From<form_net::FormError> for Error {
+    /// The form's status (400, 413, 415, 422, or 403 for a token) and code.
+    fn from(e: form_net::FormError) -> Self {
+        Self::new(e.status_hint(), e.code()).with_source(e)
+    }
+}
+
 impl From<crate::RenderError> for Error {
     fn from(e: crate::RenderError) -> Self {
         Self::internal(e.code()).with_source(e)

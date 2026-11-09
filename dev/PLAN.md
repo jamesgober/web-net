@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) &rarr; [`DIRECTIVES.md`](./DIRECTIVES.md) &rarr; **this file** &rarr; [`ROADMAP.md`](./ROADMAP.md).
 >
-> **Status:** `0.3.0`, static files and the finish step. Core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
+> **Status:** `0.4.0`, actions: forms, uploads, CSRF. Static files at `0.3.0`; core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
 
 ---
 
@@ -66,13 +66,14 @@ One fixed path. Each step answers or hands on; nothing runs that the request doe
 | 5 | method | 405 + `Allow`; 501 for an unknown method | `HEAD` follows `GET`; `OPTIONS` answered automatically |
 | 6 | authorize | 303 to sign-in, 401 + challenge, 403, 404 (hidden), other 4xx | not called for public routes |
 | 7 | checkpoint | the checkpoint's status | `Stage::Authorized` |
+| 7a | csrf | 403 | unsafe methods on routes that are not exempt (section 12.3) |
 | 8 | hooks `Routed` | the hook's error | only hooks registered for this route |
 | 9 | handler | the handler's error; 500 on panic | writes into a reply web-net holds |
 | 10 | render | 500 | `Stage::BeforeRender` checkpoint first |
 | 11 | hooks `Finish` | the hook's error | add headers |
 | 12 | finish | 500 for an invalid field | the reply is copied to serve-net; `x-content-type-options: nosniff` and the security headers, except fields the handler set |
 
-Still to come on this path (roadmap): CSRF after authorize (0.4), the cache fast path after authorize (0.5). The handler's own conditional fast path is `Cx::not_modified` (0.3).
+Still to come on this path (roadmap): the cache fast path after authorize (0.5). The handler's own conditional fast path is `Cx::not_modified` (0.3).
 
 Why authentication runs before routing: a ban, an expired session, or a forged token is caught before any route code or route lookup, and the router never needs to know about credentials. The cost is one gate call for requests that end in 404; a gate keeps that cheap (an in-memory session lookup).
 
@@ -214,10 +215,11 @@ pub trait View {
 | security headers | 0.3 (done) | section 12.2 |
 | cookies out | 0.3 (done) | `Cx::set_cookie(&SetCookie)`; cookie-net is re-exported as `web_net::cookie_net` so the versions match |
 | conditional fast path | 0.3 (done) | `Cx::not_modified(tag)` sets `ETag` and answers 304 when `If-None-Match` matches (weak comparison, `GET`/`HEAD`) |
-| forms and uploads | 0.4 | form-net: `Cx::form::<T>()`, multipart uploads, per-route limits, inspectors |
-| CSRF | 0.4 | csrf-sec: origin policy plus a session-bound token on every unsafe method unless the route opts out with a reason; the body cannot be read before the check |
-| actions | 0.4 | the accepted form answers 303, the refused one re-renders with 422 |
-| external redirects | 0.4 | an allowlist of hosts |
+| forms and uploads | 0.4 (done) | section 12.3 |
+| CSRF | 0.4 (done) | section 12.3 |
+| actions | 0.4 (done) | the accepted form answers 303 (`see_other`), the refused one renders again with 422 from the `FormError` the handler got |
+| external redirects | 0.4 (done) | `Builder::redirect_hosts` and `Cx::redirect_external`: `https://` or `http://`, a listed host, no user information, visible ASCII |
+| preconditions | 0.4 (done) | `Cx::precondition(tag, modified)`: `If-Match` (strong) and `If-Unmodified-Since` answer 412 before an unsafe request changes anything |
 | negotiation | 0.5 | `Accept` (HTML or JSON error replies), `Accept-Language` locale |
 | CORS | 0.5 | per group; preflight answered |
 | compression | 0.5 | compress-lib, for direct deployments (a proxy in front usually compresses) |
@@ -253,6 +255,27 @@ pub trait View {
 
 Cost: about 400 bytes per reply and one comparison per field against the handler's fields.
 
+### 12.3 Forms, uploads, and CSRF
+
+Forms go through form-net (re-exported as `web_net::form_net`, so its `form!` macro needs no other dependency):
+
+- `Cx::form::<T>()` reads a urlencoded or multipart body into a typed form with the route's `form_limits` (default `form_net::Limits::DEFAULT`); `form_inspected` adds an inspector (a content policy that sees every part and field first). The error is form-net's `FormError`, so an action can render the form again with 422; `?` turns it into an `Error` with its status (400, 413, 415, 422, or 403 for a token).
+- `Cx::upload(&Store)` (feature `uploads`) reads a multipart upload: text in memory, files in the store's private temporary files.
+- A form posted with a token lists `csrf_token` in its `ignore` list.
+
+Every unsafe method (`POST`, `PUT`, `PATCH`, `DELETE`) on a route that is not exempt passes the CSRF step after authorization and before any hook or handler. An application with such a route and no `Builder::csrf(Csrf)` does not build; `Route::csrf_exempt(reason)` takes a route out, and an empty reason stops the build.
+
+1. **Binding.** The identity's `csrf_binding()` (the session id, or a pre-session id the gate gives guests). None: 403 `csrf.no_binding`.
+2. **Origin policy** (csrf-sec): `Sec-Fetch-Site`, `Origin`, `Referer` against the request's own origin. Cross-site or a foreign origin: 403.
+3. **Token**, from exactly one `X-CSRF-Token` field, or else from the `csrf_token` form field:
+   - urlencoded: checked here, with form-net's own parser and the route's limits, so the handler runs only with a verified token;
+   - multipart: checked by `Cx::form` or `Cx::upload` in the pass that reads the body; the token must come before any file part, so a forged token stores nothing. Until then `Cx::body` refuses (403 `csrf.unverified`), and a handler that returns without reading its form has its whole reply replaced with 403 (and a `Failed` event: a handler bug);
+   - anything else (no field, another content type): 403 `csrf.missing`.
+
+`Cx::csrf_token()` issues a token for the visitor's binding, masked differently on every call.
+
+Cost [est., csrf-sec's own measurements]: about 110 ns to verify a token and about 1 ns for the policy; a urlencoded form is parsed once more for its token (the same parser, bounded by the route's limits).
+
 ---
 
 ## 13. Threats
@@ -263,13 +286,13 @@ Cost: about 400 bytes per reply and one comparison per field against the handler
 | `..` escaping a folder | dot segments removed after decoding, never above the root | 0.2 |
 | forgotten authorization | access declared on every route or the build fails; `Cx` only after the gate | 0.2 |
 | host-header poisoning | unknown hosts 421; redirects use declared hosts only | 0.2 |
-| open redirects | handler redirects site-relative only (`//` and `/\` refused) | 0.2; allowlist 0.4 |
+| open redirects | handler redirects site-relative only (`//` and `/\` refused); other hosts only from an allowlist, user information refused | 0.2; 0.4 (done) |
 | information leaks in errors | generic pages and a reference; codes and sources only to events | 0.2 |
 | half-written replies after a failure | the reply is held and discarded on error or panic | 0.2 |
 | header injection | reply fields checked as they are set; framing fields refused | 0.2 |
 | parameter pollution | a repeated query name is a 400 | 0.2 |
 | cookie tossing | a cookie name twice, or two `Cookie` fields, is ambiguous and never picked | 0.2 |
-| CSRF | session-bound token and origin policy on unsafe methods | 0.4 |
+| CSRF | session-bound token and origin policy on every unsafe method; build fails without them; the body is locked until the token is checked | 0.4 (done) |
 | XSS | contextual escaping in the engine; a strict CSP by default | engine; 0.3 (done) |
 | clickjacking | frame headers by default | 0.3 (done) |
 | directory traversal in static files | canonical path, segment rules, resolved path checked against the root | 0.3 (done) |
@@ -289,6 +312,7 @@ src/
   app.rs       App, Builder, the pipeline, hooks, classify, health, the error function
   assets.rs    static files: resolution, validators, ranges, variants, parts, MIME
   headers.rs   SecurityHeaders
+  csrf.rs      the CSRF step and the form token check
   url.rs       normalization, canonical encoding, TrailingSlash
   router.rs    pattern parsing, the segment trie, captures
   gate.rs      Identity, Gate, Denial, Open, Guest
@@ -309,8 +333,8 @@ src/
 | serve-net 0.7 (`http1`) | 0.2 | the server; `HttpService`, requests, replies, the testing helpers; http-net through its re-export |
 | cookie-net 0.7 | 0.2 | reading the `Cookie` field; `SetCookie` (re-exported) from 0.3 |
 | parse-net 0.9.2 | 0.3 | entity tags, HTTP dates, `Range` and `If-Range`, `Accept-Encoding`; later `Accept` and media types |
-| form-net 0.9 | 0.4 | forms and uploads |
-| csrf-sec 0.9 | 0.4 | CSRF tokens and origin policy |
+| form-net 0.9 | 0.4 | forms and uploads (re-exported) |
+| csrf-sec 0.9.3 | 0.4 | CSRF tokens and origin policy (re-exported) |
 | compress-lib 0.9 | 0.5 | response compression |
 
 No third-party runtime dependency. First-party crates at published versions only. No template engine: engines depend on web-net, not the other way round.
@@ -389,3 +413,10 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-026 | 2026-11-08 | Files over 1 MiB go out in 64 KiB parts, each read at serve-net's sent offset | no per-reply state and bounded memory per connection |
 | D-027 | 2026-11-08 | One range per request; several ranges get the whole file | multipart byte ranges are rare and a known amplification vector; RFC 9110 allows ignoring `Range` |
 | D-028 | 2026-11-08 | cookie-net is re-exported for `Cx::set_cookie` | the caller's `SetCookie` is always the version web-net encodes |
+| D-029 | 2026-11-08 | Every unsafe method needs CSRF unless the route is exempt with a reason; the build fails without an engine | nothing is unprotected by omission (D-002 for CSRF) |
+| D-030 | 2026-11-08 | Urlencoded tokens are checked before the handler; multipart tokens in the form pass, with the raw body locked and an unread form turning the reply into 403 | the token is always checked before the request's data is used, without parsing an upload twice |
+| D-031 | 2026-11-08 | No binding, no unsafe request | a guest's forms need a pre-session id from the gate; refusing is the only safe answer without one |
+| D-032 | 2026-11-08 | `Cx::form` returns form-net's error; `?` maps it to its status | an action renders the form again with the details; a careless handler still answers correctly |
+| D-033 | 2026-11-08 | External redirects only to allowlisted hosts, never with user information | open redirects stay impossible |
+| D-034 | 2026-11-08 | Preconditions (`If-Match`, `If-Unmodified-Since`) are checked by the handler through `Cx::precondition` | only the handler knows the current version of what it changes |
+| D-035 | 2026-11-08 | form-net and csrf-sec are re-exported | one version of each in an application, and `form!` works through `web_net::form_net` |

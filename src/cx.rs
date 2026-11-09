@@ -113,6 +113,9 @@ pub struct Cx<'r, I> {
     pub(crate) out: &'r mut Out,
     pub(crate) shared: &'r Shared,
     pub(crate) template: Option<TemplateId>,
+    pub(crate) csrf: crate::csrf::State,
+    pub(crate) binding: Option<&'r [u8]>,
+    pub(crate) limits: &'r form_net::Limits,
 }
 
 impl<'r, I> Cx<'r, I> {
@@ -199,14 +202,217 @@ impl<'r, I> Cx<'r, I> {
         Ok(found)
     }
 
-    /// The request body.
+    /// The raw request body.
     ///
     /// # Errors
     ///
-    /// None today; reading the body is fallible so CSRF and body inspection
-    /// can refuse it in later versions without changing handlers.
+    /// 403 `csrf.unverified` for a multipart body whose CSRF token has not
+    /// been checked yet: read it with [`form`](Self::form) or
+    /// `upload` (feature `uploads`), which check the token in the same pass.
     pub fn body(&self) -> Result<&'r [u8]> {
+        if self.csrf == crate::csrf::State::Pending {
+            return Err(Error::forbidden("csrf.unverified"));
+        }
         Ok(self.req.http.body_bytes())
+    }
+
+    /// Reads the body as a typed form (urlencoded or multipart text fields),
+    /// with the route's [`form_limits`](crate::Route::form_limits).
+    ///
+    /// A multipart body's CSRF token is checked in the same pass (it must
+    /// come before any file part). A form type that is posted with a token
+    /// lists the token field in its `ignore` list (`ignore =
+    /// ["csrf_token"]`).
+    ///
+    /// The error keeps form-net's detail, so an action can render the form
+    /// again with 422; `?` turns it into an [`Error`] with its status.
+    ///
+    /// ```
+    /// use web_net::form_net::{self, FromForm};
+    ///
+    /// form_net::form! {
+    ///     pub struct Signup { pub email: String }
+    ///     ignore = ["csrf_token"];
+    /// }
+    ///
+    /// let app = web_net::App::builder()
+    ///     .route(web_net::post("/signup", |cx| {
+    ///         let form: Signup = cx.form()?;
+    ///         cx.text(200, &form.email);
+    ///         Ok(())
+    ///     }).public().csrf_exempt("example without a session"))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app,
+    ///     b"POST /signup HTTP/1.1\r\nHost: a\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 15\r\n\r\nemail=a%40b.com");
+    /// assert_eq!(r.text(), "a@b.com");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// form-net's [`FormError`](form_net::FormError): 415 for another media
+    /// type, 413 for a budget passed, 400 for malformed input, 422 for
+    /// fields that do not fit `T`, 403 for a CSRF token.
+    pub fn form<T: form_net::FromForm>(&mut self) -> std::result::Result<T, form_net::FormError> {
+        self.form_inspected(&mut form_net::NoInspector)
+    }
+
+    /// As [`form`](Self::form), with an inspector beside the parse (a
+    /// content policy that sees every part and field first).
+    ///
+    /// # Errors
+    ///
+    /// As [`form`](Self::form), plus the inspector's refusals.
+    pub fn form_inspected<T: form_net::FromForm, N: form_net::Inspector>(
+        &mut self,
+        inspector: &mut N,
+    ) -> std::result::Result<T, form_net::FormError> {
+        let content_type = self.req.header("content-type").unwrap_or(b"");
+        let body = self.req.http.body_bytes();
+        match (self.csrf, self.shared.csrf.as_ref(), self.binding) {
+            (crate::csrf::State::Pending, Some(engine), Some(binding)) => {
+                let mut check = crate::csrf::token_check(engine, binding);
+                let result = T::from_body_inspected(
+                    content_type,
+                    body,
+                    self.limits,
+                    &crate::csrf::TOKEN_POLICY,
+                    &mut (&mut check, inspector),
+                );
+                if check.verified() {
+                    self.csrf = crate::csrf::State::Verified;
+                }
+                result
+            }
+            _ => T::from_body_inspected(
+                content_type,
+                body,
+                self.limits,
+                &form_net::Policy::DEFAULT,
+                inspector,
+            ),
+        }
+    }
+
+    /// Reads a multipart upload into `store` (feature `uploads`): text
+    /// fields in memory, files in the store's private temporary files, with
+    /// the route's form limits. The CSRF token is checked before any file
+    /// byte is stored. Turn the result into a typed form with
+    /// `T::from_upload(upload)`.
+    ///
+    /// # Errors
+    ///
+    /// As [`form`](Self::form), plus the store's errors.
+    #[cfg(feature = "uploads")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "uploads")))]
+    pub fn upload(
+        &mut self,
+        store: &form_net::Store,
+    ) -> std::result::Result<form_net::Upload, form_net::FormError> {
+        self.upload_inspected(store, &mut form_net::NoInspector)
+    }
+
+    /// As [`upload`](Self::upload), with an inspector beside the parse.
+    ///
+    /// # Errors
+    ///
+    /// As [`upload`](Self::upload), plus the inspector's refusals.
+    #[cfg(feature = "uploads")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "uploads")))]
+    pub fn upload_inspected<N: form_net::Inspector>(
+        &mut self,
+        store: &form_net::Store,
+        inspector: &mut N,
+    ) -> std::result::Result<form_net::Upload, form_net::FormError> {
+        let content_type = self.req.header("content-type").unwrap_or(b"");
+        let body = self.req.http.body_bytes();
+        match (self.csrf, self.shared.csrf.as_ref(), self.binding) {
+            (crate::csrf::State::Pending, Some(engine), Some(binding)) => {
+                let mut check = crate::csrf::token_check(engine, binding);
+                let mut hooks = (&mut check, inspector);
+                let mut session = form_net::UploadSession::new(
+                    content_type,
+                    self.limits,
+                    &crate::csrf::TOKEN_POLICY,
+                    store,
+                )?;
+                session.push(body, &mut hooks)?;
+                let upload = session.finish(&mut hooks)?;
+                if hooks.0.verified() {
+                    self.csrf = crate::csrf::State::Verified;
+                }
+                Ok(upload)
+            }
+            _ => {
+                let mut session = form_net::UploadSession::new(
+                    content_type,
+                    self.limits,
+                    &form_net::Policy::DEFAULT,
+                    store,
+                )?;
+                session.push(body, inspector)?;
+                session.finish(inspector)
+            }
+        }
+    }
+
+    /// A CSRF token for the visitor's session, to put in a form's hidden
+    /// `csrf_token` field or a script's `X-CSRF-Token` header. Different on
+    /// every call (masked), so a compression side channel cannot recover it.
+    ///
+    /// # Errors
+    ///
+    /// 500 `csrf.no_engine` without [`Builder::csrf`](crate::Builder::csrf);
+    /// 500 `csrf.no_binding` when the identity has no binding.
+    pub fn csrf_token(&self) -> Result<String> {
+        let engine = self
+            .shared
+            .csrf
+            .as_ref()
+            .ok_or_else(|| Error::internal("csrf.no_engine"))?;
+        let binding = self
+            .binding
+            .filter(|b| !b.is_empty())
+            .ok_or_else(|| Error::internal("csrf.no_binding"))?;
+        engine
+            .issue(binding)
+            .map(|t| t.as_str().to_owned())
+            .map_err(|e| Error::internal("csrf.issue").with_source(e))
+    }
+
+    /// Checks `If-Match` and `If-Unmodified-Since` against the current
+    /// version of what an unsafe request would change (RFC 9110 section
+    /// 13.2): `tag` is its entity tag's opaque part, `modified` its
+    /// modification time. Call it before changing anything.
+    ///
+    /// # Errors
+    ///
+    /// 412 `precondition.failed` when a condition is false. Without either
+    /// field, `Ok`.
+    pub fn precondition(
+        &self,
+        tag: Option<&str>,
+        modified: Option<std::time::SystemTime>,
+    ) -> Result {
+        let current = tag.and_then(|t| parse_net::EntityTag::strong(t.as_bytes()).ok());
+        if let Some(v) = self.req.header("if-match") {
+            if !parse_net::if_match(v, current.as_ref()).unwrap_or(false) {
+                return Err(Error::new(412, "precondition.failed"));
+            }
+            return Ok(());
+        }
+        if let (Some(v), Some(m)) = (self.req.header("if-unmodified-since"), modified) {
+            let (Ok(since), Ok(lm)) = (
+                parse_net::http_date(v),
+                parse_net::HttpDate::from_system_time(m),
+            ) else {
+                return Ok(());
+            };
+            if lm > since {
+                return Err(Error::new(412, "precondition.failed"));
+            }
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------- reply
@@ -341,6 +547,48 @@ impl<'r, I> Cx<'r, I> {
     /// string a handler passes along.
     pub fn see_other(&mut self, path: &str) -> Result {
         self.redirect(303, path)
+    }
+
+    /// A redirect to another site, only to a host listed with
+    /// [`Builder::redirect_hosts`](crate::Builder::redirect_hosts):
+    /// `https://` (or `http://`), the host, and a visible-ASCII rest.
+    ///
+    /// # Errors
+    ///
+    /// 500 `redirect.not_allowed` for any other target, 500
+    /// `redirect.status` for a status that is not a redirect.
+    pub fn redirect_external(&mut self, status: u16, url: &str) -> Result {
+        if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+            return Err(Error::internal("redirect.status"));
+        }
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .ok_or_else(|| Error::internal("redirect.not_allowed"))?;
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = rest[..end].to_ascii_lowercase();
+        let host = authority
+            .rsplit_once(':')
+            .map_or(authority.as_str(), |(h, p)| {
+                if p.bytes().all(|b| b.is_ascii_digit()) && !p.is_empty() {
+                    h
+                } else {
+                    ""
+                }
+            });
+        let listed = self
+            .shared
+            .redirect_hosts
+            .iter()
+            .any(|h| h.as_ref() == authority || h.as_ref() == host);
+        let visible = url.bytes().all(|c| (0x21..0x7f).contains(&c) && c != b'\\');
+        if !listed || !visible || authority.contains('@') {
+            return Err(Error::internal("redirect.not_allowed"));
+        }
+        self.out.header("location", url.as_bytes());
+        self.out.status = status;
+        self.out.body.clear();
+        Ok(())
     }
 
     /// A redirect with `status` (301, 302, 303, 307, 308) to a
