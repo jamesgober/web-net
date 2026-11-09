@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) &rarr; [`DIRECTIVES.md`](./DIRECTIVES.md) &rarr; **this file** &rarr; [`ROADMAP.md`](./ROADMAP.md).
 >
-> **Status:** `0.2.0`, core and design lock. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
+> **Status:** `0.3.0`, static files and the finish step. Core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
 
 ---
 
@@ -60,6 +60,7 @@ One fixed path. Each step answers or hands on; nothing runs that the request doe
 |---|---|---|---|
 | 1 | site | 421 unknown host; 301/308 to the canonical host or to HTTPS | host table from the builder; the base path is removed here |
 | 2 | url | 400 malformed; 301/308 to the canonical spelling | section 4 |
+| 2a | early | 404 for a missing file; 405 for a method other than `GET`/`HEAD` | health paths and static files, before the gate (section 12) |
 | 3 | authenticate | the gate's denial (403 for a ban) | skipped by `respond_identified` |
 | 4 | route | 404 | section 5 |
 | 5 | method | 405 + `Allow`; 501 for an unknown method | `HEAD` follows `GET`; `OPTIONS` answered automatically |
@@ -69,9 +70,9 @@ One fixed path. Each step answers or hands on; nothing runs that the request doe
 | 9 | handler | the handler's error; 500 on panic | writes into a reply web-net holds |
 | 10 | render | 500 | `Stage::BeforeRender` checkpoint first |
 | 11 | hooks `Finish` | the hook's error | add headers |
-| 12 | finish | 500 for an invalid field | the reply is copied to serve-net; `x-content-type-options: nosniff` unless set |
+| 12 | finish | 500 for an invalid field | the reply is copied to serve-net; `x-content-type-options: nosniff` and the security headers, except fields the handler set |
 
-Still to come on this path (roadmap): static files and health before routing (0.3), CSRF after authorize (0.4), the conditional and cache fast paths after authorize (0.3 and 0.5), security headers at finish (0.3).
+Still to come on this path (roadmap): CSRF after authorize (0.4), the cache fast path after authorize (0.5). The handler's own conditional fast path is `Cx::not_modified` (0.3).
 
 Why authentication runs before routing: a ban, an expired session, or a forged token is caught before any route code or route lookup, and the router never needs to know about credentials. The cost is one gate call for requests that end in 404; a gate keeps that cheap (an in-memory session lookup).
 
@@ -204,15 +205,15 @@ pub trait View {
 
 ---
 
-## 12. Built-in pieces still to come
+## 12. Built-in pieces
 
 | Piece | Version | Detail |
 |---|---|---|
-| static files | 0.3 | served before routing; hardened path joining (never outside the root, no symlink escape), `ETag` and `Last-Modified`, conditional requests, ranges, precompressed variants, cache headers, MIME by extension |
-| health | 0.3 | liveness and readiness paths answered before routing |
-| security headers | 0.3 | a policy with defaults: `Content-Security-Policy`, `X-Frame-Options`/`frame-ancestors`, `Referrer-Policy`, `Permissions-Policy`, HSTS on HTTPS |
-| cookies out | 0.3 | `Cx::set_cookie` through cookie-net's `SetCookie` |
-| conditional fast path | 0.3 | `Cx::not_modified(etag)` answers 304 before the page is built |
+| static files | 0.3 (done) | section 12.1 |
+| health | 0.3 (done) | `health(path)`: `200 ok`; `ready(path, check)`: `200 ready` or `503 not ready`; `GET`/`HEAD` only, `no-store`, before the gate |
+| security headers | 0.3 (done) | section 12.2 |
+| cookies out | 0.3 (done) | `Cx::set_cookie(&SetCookie)`; cookie-net is re-exported as `web_net::cookie_net` so the versions match |
+| conditional fast path | 0.3 (done) | `Cx::not_modified(tag)` sets `ETag` and answers 304 when `If-None-Match` matches (weak comparison, `GET`/`HEAD`) |
 | forms and uploads | 0.4 | form-net: `Cx::form::<T>()`, multipart uploads, per-route limits, inspectors |
 | CSRF | 0.4 | csrf-sec: origin policy plus a session-bound token on every unsafe method unless the route opts out with a reason; the body cannot be read before the check |
 | actions | 0.4 | the accepted form answers 303, the refused one re-renders with 422 |
@@ -222,6 +223,35 @@ pub trait View {
 | compression | 0.5 | compress-lib, for direct deployments (a proxy in front usually compresses) |
 | caching | 0.5 | `CachePolicy` per route; a cacheability report from `respond_identified` so a cache in front can store guest pages; a per-variant cache seam |
 | several sites | 0.5 | a site table choosing the app by host and base path |
+
+### 12.1 Static files
+
+- `Assets::new(mount, dir)`, added with `Builder::assets`. Served in the early step, before the gate and the router: files are public. A route under a mount stops the build (it could never run).
+- The path is canonical already (section 4). Each decoded segment is checked again for what file systems read specially, on every platform so a site behaves the same everywhere: a leading dot (`.env`, `.git`; `hidden_files(true)` allows them), `:` (Windows alternate data streams and drive letters), a trailing dot or space (Windows drops them, so `secret.txt.` would open `secret.txt`), `\`, NUL, and the Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, with any extension). Any of them is a 404.
+- The joined path is resolved (`canonicalize`) and must still be under the resolved root, so a symbolic link cannot lead out of the folder. Links that stay inside work. The window between the check and the open is only reachable by someone who can write into the folder.
+- A folder is a 404 unless the mount has an `index` file. There are never listings.
+- Validators: a strong `ETag` from the length, the modification time (nanoseconds), and the coding; `Last-Modified`. `If-None-Match` (weak comparison) answers 304; without it, `If-Modified-Since` does. Malformed conditions are ignored, as RFC 9110 says.
+- Ranges (`GET` only): one range is a 206 with `Content-Range`; an unsatisfiable one a 416 with `bytes */length`; several ranges, or an `If-Range` that does not match, get the whole file (RFC 9110 lets a server ignore `Range`). `Accept-Ranges: bytes`.
+- Precompressed variants (default on): with `Accept-Encoding`, `file.br` or `file.gz` next to the file is served with `Content-Encoding`, its own `ETag`, and `Vary: accept-encoding`. Without the field, the plain file.
+- `Cache-Control` per mount (default `no-cache`: kept and revalidated).
+- Files up to `INLINE_LIMIT` (1 MiB) are read whole; larger ones go out in 64 KiB parts through serve-net's streamed reply. Each part is read at the offset serve-net reports as sent, so nothing is held between parts; a file that shrinks under the reply closes the connection.
+- MIME by extension (`mime_for`), with `charset=utf-8` for text types; anything unknown is `application/octet-stream`, and `nosniff` stops the browser guessing.
+
+### 12.2 Security headers
+
+`SecurityHeaders` (builder `security_headers`) applies to every reply web-net sends: pages, error pages, files, redirects, `OPTIONS`. A field the handler set itself wins. Defaults:
+
+| Field | Default |
+|---|---|
+| `Content-Security-Policy` | `default-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), payment=()` |
+| `Cross-Origin-Opener-Policy` | `same-origin` |
+| `Strict-Transport-Security` | `max-age=31536000`, on HTTPS replies only and never for a development host |
+| `X-Content-Type-Options` | `nosniff`, always (also with `SecurityHeaders::none()`) |
+
+Cost: about 400 bytes per reply and one comparison per field against the handler's fields.
 
 ---
 
@@ -240,9 +270,11 @@ pub trait View {
 | parameter pollution | a repeated query name is a 400 | 0.2 |
 | cookie tossing | a cookie name twice, or two `Cookie` fields, is ambiguous and never picked | 0.2 |
 | CSRF | session-bound token and origin policy on unsafe methods | 0.4 |
-| XSS | contextual escaping in the engine; security headers (CSP) | engine; 0.3 |
-| clickjacking | frame headers by default | 0.3 |
-| directory traversal in static files | hardened joining, symlinks checked | 0.3 |
+| XSS | contextual escaping in the engine; a strict CSP by default | engine; 0.3 (done) |
+| clickjacking | frame headers by default | 0.3 (done) |
+| directory traversal in static files | canonical path, segment rules, resolved path checked against the root | 0.3 (done) |
+| hidden and special files | dot files, alternate data streams, trailing dots and spaces, device names refused | 0.3 (done) |
+| protocol downgrade | HSTS on HTTPS replies | 0.3 (done) |
 | resource exhaustion | serve-net's limits; web-net's page budget, segment limit (256), parameter limit (8), field limit (64) | 0.2 |
 
 Every row has an attack test by 0.7.
@@ -254,7 +286,9 @@ Every row has an attack test by 0.7.
 ```
 src/
   lib.rs       crate docs, re-exports
-  app.rs       App, Builder, the pipeline, hooks, classify, the error function
+  app.rs       App, Builder, the pipeline, hooks, classify, health, the error function
+  assets.rs    static files: resolution, validators, ranges, variants, parts, MIME
+  headers.rs   SecurityHeaders
   url.rs       normalization, canonical encoding, TrailingSlash
   router.rs    pattern parsing, the segment trie, captures
   gate.rs      Identity, Gate, Denial, Open, Guest
@@ -273,8 +307,8 @@ src/
 | Crate | Since | Why |
 |---|---|---|
 | serve-net 0.7 (`http1`) | 0.2 | the server; `HttpService`, requests, replies, the testing helpers; http-net through its re-export |
-| cookie-net 0.7 | 0.2 | reading the `Cookie` field; `SetCookie` from 0.3 |
-| parse-net 0.9 | 0.3 | `If-None-Match`, `Range`, `Accept`, media types |
+| cookie-net 0.7 | 0.2 | reading the `Cookie` field; `SetCookie` (re-exported) from 0.3 |
+| parse-net 0.9.2 | 0.3 | entity tags, HTTP dates, `Range` and `If-Range`, `Accept-Encoding`; later `Accept` and media types |
 | form-net 0.9 | 0.4 | forms and uploads |
 | csrf-sec 0.9 | 0.4 | CSRF tokens and origin policy |
 | compress-lib 0.9 | 0.5 | response compression |
@@ -347,3 +381,11 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-018 | 2026-11-08 | Development hosts are trusted only on a builder marked `development()` | production never trusts "localhost" |
 | D-019 | 2026-11-08 | `https_only` needs a declared host | a redirect is never built from the request's `Host` |
 | D-020 | 2026-11-08 | Authentication runs before routing | bans and forged credentials are caught before any route code; the router knows nothing about credentials |
+| D-021 | 2026-11-08 | Health paths and static files are answered before the gate and the router | they are public and must stay cheap under load; a route under a mount is a build error |
+| D-022 | 2026-11-08 | Asset segments that file systems read specially are refused on every platform, and the resolved path must stay under the resolved root | one behaviour everywhere; no symbolic-link or Windows-name escape |
+| D-023 | 2026-11-08 | No directory listings; an index file only when the mount names one | listings leak what a folder holds |
+| D-024 | 2026-11-08 | Strict security headers by default; HSTS only on HTTPS and never for development hosts; a handler's own field wins | secure by default without pinning `localhost` to HTTPS in a browser |
+| D-025 | 2026-11-08 | Precompressed variants only when the client sent `Accept-Encoding`; each variant has its own `ETag`; `Vary` always on such mounts | caches never mix codings; clients that send no field get the plain file |
+| D-026 | 2026-11-08 | Files over 1 MiB go out in 64 KiB parts, each read at serve-net's sent offset | no per-reply state and bounded memory per connection |
+| D-027 | 2026-11-08 | One range per request; several ranges get the whole file | multipart byte ranges are rare and a known amplification vector; RFC 9110 allows ignoring `Range` |
+| D-028 | 2026-11-08 | cookie-net is re-exported for `Cx::set_cookie` | the caller's `SetCookie` is always the version web-net encodes |

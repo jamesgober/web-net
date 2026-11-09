@@ -244,6 +244,74 @@ impl<'r, I> Cx<'r, I> {
         self.status(status).body_bytes(text.as_bytes())
     }
 
+    /// Adds a `Set-Cookie` field built with cookie-net (re-exported as
+    /// [`web_net::cookie_net`](crate::cookie_net)).
+    ///
+    /// ```
+    /// use web_net::{App, get, cookie_net::SetCookie};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx| {
+    ///         cx.set_cookie(&SetCookie::new("theme", "dark").map_err(|_| web_net::Error::internal("cookie"))?);
+    ///         cx.text(200, "ok");
+    ///         Ok(())
+    ///     }).public())
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// assert!(r.header("set-cookie").is_some());
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    pub fn set_cookie(&mut self, cookie: &cookie_net::SetCookie<'_>) -> &mut Self {
+        let line = cookie.encode();
+        self.out.header("set-cookie", line.as_bytes());
+        self
+    }
+
+    /// The conditional fast path for a page: sets `ETag: "<tag>"` and, when
+    /// the request's `If-None-Match` matches it (a `GET` or `HEAD`), turns the
+    /// reply into `304 Not Modified` and returns `true`, so the handler
+    /// returns before building the page.
+    ///
+    /// `tag` is the opaque part (letters, digits, and `-._~` are safe), for
+    /// example a revision number. An unusable tag sets nothing and returns
+    /// `false`.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx| {
+    ///         if cx.not_modified("rev-7") {
+    ///             return Ok(());
+    ///         }
+    ///         cx.html(200, "<h1>page</h1>");
+    ///         Ok(())
+    ///     }).public())
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"rev-7\"\r\n\r\n");
+    /// assert_eq!(r.status, 304);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    pub fn not_modified(&mut self, tag: &str) -> bool {
+        let Ok(current) = parse_net::EntityTag::strong(tag.as_bytes()) else {
+            return false;
+        };
+        let quoted = format!("\"{tag}\"");
+        self.out.header("etag", quoted.as_bytes());
+        if !matches!(self.method(), Method::Get | Method::Head) {
+            return false;
+        }
+        let matched = self
+            .req
+            .header("if-none-match")
+            .is_some_and(|v| parse_net::if_none_match(v, &current).unwrap_or(false));
+        if matched {
+            self.out.status = 304;
+            self.out.body.clear();
+        }
+        matched
+    }
+
     fn content_type(&mut self, value: &str) {
         if !self.out.has_type {
             self.out.header("content-type", value.as_bytes());

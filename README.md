@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party runtime dependencies.
     </p>
     <blockquote>
-        <strong>Status: <code>0.2.0</code>, core.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
+        <strong>Status: <code>0.3.0</code>.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
     </blockquote>
 </div>
 
@@ -40,7 +40,7 @@
 
 ```toml
 [dependencies]
-web-net = "0.2"
+web-net = "0.3"
 serve-net = "0.7"
 ```
 
@@ -92,7 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **Templates**: implement `Render` and read values through `View`. Engines live in their own crates; web-net depends on none.
 - **Detection and logs**: implement `Events` (every refusal, denial, failure, panic) and `Checkpoint` (in-flight revocation).
 
-Coming next (see the roadmap): static files, health, security headers and cookies out (0.3); forms, uploads, and CSRF through form-net and csrf-sec (0.4); negotiation, CORS, compression, caching, and several sites (0.5).
+Built in: static files (`Assets`: validators, ranges, precompressed variants, no escape from the folder), health and readiness paths, strict security headers by default (`SecurityHeaders`), cookies out through cookie-net, and a 304 fast path for pages (`Cx::not_modified`).
+
+Coming next (see the roadmap): forms, uploads, and CSRF through form-net and csrf-sec (0.4); negotiation, CORS, compression, caching, and several sites (0.5).
 
 <hr>
 <br>

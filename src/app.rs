@@ -13,8 +13,10 @@ use serve_net::{
     WorkClass,
 };
 
+use crate::assets::{self, Assets};
 use crate::cx::{Out, is_local_target};
 use crate::error::{self, BuildError, Problem};
+use crate::headers::SecurityHeaders;
 use crate::route::{Access, BoxHandler, Group, Route};
 use crate::router::{self, Captures, Trie};
 use crate::url::{self, TrailingSlash};
@@ -116,6 +118,23 @@ pub(crate) struct Shared {
     sign_in: Option<Box<str>>,
     challenge: Box<str>,
     wipe: bool,
+    security: SecurityHeaders,
+}
+
+/// Where a reply is going: the request's envelope, and whether security
+/// headers for HTTPS apply (HTTPS, and not a development host).
+#[derive(Clone, Copy)]
+pub(crate) struct At<'a> {
+    pub(crate) env: &'a Envelope,
+    pub(crate) tls: bool,
+}
+
+type ReadyFn = Arc<dyn Fn() -> bool + Send + Sync>;
+
+#[derive(Clone)]
+enum Health {
+    Live,
+    Ready(ReadyFn),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -182,6 +201,8 @@ pub struct App<G: Gate = Open> {
     endpoints: Vec<Endpoint>,
     entries: Vec<Entry<G>>,
     allow_all: Box<str>,
+    assets: Vec<Assets>,
+    health: Vec<(Box<str>, Health)>,
 }
 
 impl App<Open> {
@@ -216,6 +237,9 @@ pub struct Builder<G: Gate> {
     sign_in: Option<String>,
     challenge: String,
     wipe: bool,
+    security: SecurityHeaders,
+    assets: Vec<Assets>,
+    health: Vec<(String, Health)>,
 }
 
 impl<G: Gate> Builder<G> {
@@ -233,7 +257,44 @@ impl<G: Gate> Builder<G> {
             sign_in: None,
             challenge: "Session".into(),
             wipe: false,
+            security: SecurityHeaders::default(),
+            assets: Vec::new(),
+            health: Vec::new(),
         }
+    }
+
+    /// Serves a folder of files under a mount path, before routing and
+    /// without the gate (files are public).
+    #[must_use]
+    pub fn assets(mut self, assets: Assets) -> Self {
+        self.assets.push(assets);
+        self
+    }
+
+    /// A liveness path (`/healthz`): `200 ok` whenever the process answers.
+    /// Answered before routing and without the gate.
+    #[must_use]
+    pub fn health(mut self, path: &str) -> Self {
+        self.health.push((path.to_owned(), Health::Live));
+        self
+    }
+
+    /// A readiness path (`/readyz`): `200 ready` when `check` says so,
+    /// `503 not ready` otherwise. Keep `check` to a flag read: it runs on the
+    /// request path.
+    #[must_use]
+    pub fn ready(mut self, path: &str, check: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.health
+            .push((path.to_owned(), Health::Ready(Arc::new(check))));
+        self
+    }
+
+    /// The security headers every reply carries (default
+    /// [`SecurityHeaders::default`]).
+    #[must_use]
+    pub fn security_headers(mut self, policy: SecurityHeaders) -> Self {
+        self.security = policy;
+        self
     }
 
     /// Adds a route.
@@ -419,6 +480,54 @@ impl<G: Gate> Builder<G> {
             problem("challenge", "the challenge must be visible ASCII".into());
         }
 
+        if !self.security.valid() {
+            problem(
+                "security_headers",
+                "every header value must be visible ASCII and not empty".into(),
+            );
+        }
+        let mut assets = self.assets;
+        for a in &mut assets {
+            let subject = format!("assets {}", a.mount);
+            if a.mount.is_empty()
+                || !is_local_target(&a.mount)
+                || url::normalize(&a.mount, self.site.lowercase).map_or(true, |n| n != a.mount)
+            {
+                problem(
+                    &subject,
+                    "the mount must be a canonical path such as '/static'".into(),
+                );
+            }
+            match std::fs::canonicalize(&a.dir) {
+                Ok(root) if root.is_dir() => a.root = root,
+                _ => problem(
+                    &subject,
+                    format!("'{}' is not a folder that exists", a.dir.display()),
+                ),
+            }
+            for r in &self.routes {
+                if a.strip(&r.pattern).is_some() {
+                    problem(
+                        &r.pattern,
+                        format!(
+                            "the route is under the assets mount '{}' and can never run",
+                            a.mount
+                        ),
+                    );
+                }
+            }
+        }
+        let mut health = Vec::new();
+        for (p, h) in self.health {
+            if !is_local_target(&p) || url::normalize(&p, false).map_or(true, |n| n != p) {
+                problem(
+                    "health",
+                    format!("'{p}' is not a canonical site-relative path"),
+                );
+            }
+            health.push((p.into_boxed_str(), h));
+        }
+
         // Error templates.
         let mut errors = Vec::new();
         if let Some(r) = &self.render {
@@ -553,12 +662,15 @@ impl<G: Gate> Builder<G> {
                 sign_in: self.sign_in.map(Into::into),
                 challenge: self.challenge.into(),
                 wipe: self.wipe,
+                security: self.security,
             },
             site: self.site,
             trie,
             endpoints,
             entries,
             allow_all: String::from_utf8(v).unwrap_or_default().into(),
+            assets,
+            health,
         })
     }
 }
@@ -790,9 +902,15 @@ impl<G: Gate> App<G> {
     ) -> Outcome {
         let method = http.method();
         let raw_path = http.path();
+        let authority = http.head().authority();
+        let at = At {
+            env,
+            tls: self.tls(env, authority),
+        };
         if raw_path == "*" {
             if method == Method::Options {
                 reply.status(204).header("allow", self.allow_all.as_bytes());
+                self.secure(reply, at.tls, |_| false);
             } else {
                 self.refuse(
                     400,
@@ -800,13 +918,12 @@ impl<G: Gate> App<G> {
                     EventKind::Refused,
                     None,
                     None,
-                    env,
+                    at,
                     reply,
                 );
             }
             return Outcome::Done;
         }
-        let authority = http.head().authority();
         let host_raw = authority.unwrap_or("");
         let placed = self.place(authority, raw_path, env.client().scheme(), false);
         let path = match placed {
@@ -822,22 +939,29 @@ impl<G: Gate> App<G> {
                     308
                 };
                 reply.status(status).header("location", loc.as_bytes());
+                self.secure(reply, at.tls, |_| false);
                 return Outcome::Done;
             }
             Placed::Refuse(status, code, src) => {
                 let src = src
                     .as_ref()
                     .map(|e| e as &(dyn std::error::Error + 'static));
-                self.refuse(status, code, EventKind::Refused, None, src, env, reply);
+                self.refuse(status, code, EventKind::Refused, None, src, at, reply);
                 return Outcome::Done;
             }
         };
+        // Early: health paths and files, before the gate and the router.
+        if let Some(outcome) = self.early(http, at, &path, reply) {
+            return outcome;
+        }
+
         let mut req = Request {
             http,
             env,
             path: &path,
             host: host_raw,
             route: None,
+            tls: at.tls,
         };
 
         // Authentication, unless the caller did it.
@@ -858,21 +982,14 @@ impl<G: Gate> App<G> {
 
         // Route and method.
         let Some((ep, caps)) = self.trie.find(&path) else {
-            self.refuse(
-                404,
-                "route.none",
-                EventKind::Refused,
-                None,
-                None,
-                env,
-                reply,
-            );
+            self.refuse(404, "route.none", EventKind::Refused, None, None, at, reply);
             return Outcome::Done;
         };
         let endpoint = &self.endpoints[ep as usize];
         let Some(idx) = self.entry_for(ep as usize, method) else {
             if method == Method::Options {
                 reply.status(204).header("allow", endpoint.allow.as_bytes());
+                self.secure(reply, at.tls, |_| false);
                 return Outcome::Done;
             }
             let status = if method == Method::Other { 501 } else { 405 };
@@ -881,7 +998,7 @@ impl<G: Gate> App<G> {
             } else {
                 "method.not_allowed"
             };
-            self.refuse(status, code, EventKind::Refused, None, None, env, reply);
+            self.refuse(status, code, EventKind::Refused, None, None, at, reply);
             if status == 405 {
                 reply.header("allow", endpoint.allow.as_bytes());
             }
@@ -907,7 +1024,7 @@ impl<G: Gate> App<G> {
                         EventKind::Revoked,
                         req.route,
                         None,
-                        env,
+                        at,
                         reply,
                     );
                     return Outcome::Done;
@@ -919,7 +1036,7 @@ impl<G: Gate> App<G> {
                         EventKind::Revoked,
                         req.route,
                         None,
-                        env,
+                        at,
                         reply,
                     );
                     return Outcome::Close;
@@ -940,6 +1057,73 @@ impl<G: Gate> App<G> {
         outcome
     }
 
+    /// Health paths and static files.
+    fn early(
+        &self,
+        http: &HttpRequest<'_>,
+        at: At<'_>,
+        path: &str,
+        reply: &mut HttpReply,
+    ) -> Option<Outcome> {
+        let method = http.method();
+        let get_like = matches!(method, Method::Get | Method::Head);
+        if let Some((_, h)) = self.health.iter().find(|(p, _)| p.as_ref() == path) {
+            if !get_like {
+                self.not_get(method, at, reply);
+                return Some(Outcome::Done);
+            }
+            let (status, text) = match h {
+                Health::Live => (200, "ok"),
+                Health::Ready(f) if f() => (200, "ready"),
+                Health::Ready(_) => (503, "not ready"),
+            };
+            reply.text(status, text).header("cache-control", "no-store");
+            self.secure(reply, at.tls, |_| false);
+            return Some(Outcome::Done);
+        }
+        let (assets, rel) = self
+            .assets
+            .iter()
+            .find_map(|a| a.strip(path).map(|rel| (a, rel)))?;
+        if !get_like {
+            self.not_get(method, at, reply);
+            return Some(Outcome::Done);
+        }
+        let Some(found) = assets::find(assets, rel, http.header("accept-encoding")) else {
+            self.refuse(
+                404,
+                "assets.none",
+                EventKind::Refused,
+                None,
+                None,
+                at,
+                reply,
+            );
+            return Some(Outcome::Done);
+        };
+        let outcome = assets::serve(assets, &found, http, reply);
+        self.secure(reply, at.tls, |_| false);
+        Some(outcome)
+    }
+
+    /// 405 (or 204 for `OPTIONS`) on a path that takes `GET` and `HEAD` only.
+    fn not_get(&self, method: Method, at: At<'_>, reply: &mut HttpReply) {
+        if method == Method::Options {
+            reply.status(204).header("allow", "GET, HEAD, OPTIONS");
+            self.secure(reply, at.tls, |_| false);
+        } else {
+            let (status, code) = if method == Method::Other {
+                (501, "method.unknown")
+            } else {
+                (405, "method.not_allowed")
+            };
+            self.refuse(status, code, EventKind::Refused, None, None, at, reply);
+            if status == 405 {
+                reply.header("allow", "GET, HEAD, OPTIONS");
+            }
+        }
+    }
+
     fn handle(
         &self,
         entry: &Entry<G>,
@@ -949,7 +1133,10 @@ impl<G: Gate> App<G> {
         out: &mut Out,
         reply: &mut HttpReply,
     ) -> Outcome {
-        let env = req.env;
+        let at = At {
+            env: req.env,
+            tls: req.tls,
+        };
         let route = req.route;
         let result = {
             let mut cx = Cx {
@@ -983,6 +1170,7 @@ impl<G: Gate> App<G> {
                 if !out.has("x-content-type-options") {
                     reply.header("x-content-type-options", "nosniff");
                 }
+                self.secure(reply, at.tls, |n| out.has(n));
                 reply.body(&out.body);
                 Outcome::Done
             }
@@ -994,7 +1182,7 @@ impl<G: Gate> App<G> {
                     EventKind::Failed,
                     route,
                     None,
-                    env,
+                    at,
                     reply,
                 );
                 Outcome::Done
@@ -1008,7 +1196,7 @@ impl<G: Gate> App<G> {
                     EventKind::Failed,
                     route,
                     src,
-                    env,
+                    at,
                     reply,
                 );
                 Outcome::Done
@@ -1021,7 +1209,7 @@ impl<G: Gate> App<G> {
                     EventKind::Panicked,
                     route,
                     None,
-                    env,
+                    at,
                     reply,
                 );
                 Outcome::Done
@@ -1032,6 +1220,7 @@ impl<G: Gate> App<G> {
     /// A gate's denial as a response.
     fn deny(&self, d: Denial, req: &Request<'_>, reply: &mut HttpReply) {
         let env = req.env;
+        let at = At { env, tls: req.tls };
         if d.kind() == DenialKind::SignIn {
             if let Some(page) = &self.shared.sign_in {
                 if matches!(req.method(), Method::Get | Method::Head) {
@@ -1053,6 +1242,7 @@ impl<G: Gate> App<G> {
                     encode_component(&next, &mut loc);
                     self.event(EventKind::Denied, env, req.route, 303, d.code(), None);
                     reply.status(303).header("location", loc.as_bytes());
+                    self.secure(reply, at.tls, |_| false);
                     return;
                 }
             }
@@ -1064,7 +1254,7 @@ impl<G: Gate> App<G> {
             EventKind::Denied,
             req.route,
             None,
-            env,
+            at,
             reply,
         );
         if status == 401 {
@@ -1102,11 +1292,11 @@ impl<G: Gate> App<G> {
         kind: EventKind,
         route: Option<&str>,
         source: Option<&(dyn std::error::Error + 'static)>,
-        env: &Envelope,
+        at: At<'_>,
         reply: &mut HttpReply,
     ) {
-        self.event(kind, env, route, status, code, source);
-        let reference = RequestId::of(env).to_string();
+        self.event(kind, at.env, route, status, code, source);
+        let reference = RequestId::of(at.env).to_string();
         let mut body = Vec::with_capacity(512);
         let mut done = false;
         if let (Some(engine), Some(&(_, t))) = (
@@ -1136,6 +1326,27 @@ impl<G: Gate> App<G> {
             .header("x-content-type-options", "nosniff")
             .header("cache-control", "no-store")
             .body(&body);
+        self.secure(reply, at.tls, |_| false);
+    }
+
+    /// Adds the policy's security headers, except those `has` says the reply
+    /// set already.
+    fn secure(&self, reply: &mut HttpReply, tls: bool, has: impl Fn(&str) -> bool) {
+        for (name, value) in self.shared.security.fields(tls) {
+            if !has(name) {
+                reply.header(name, value.as_bytes());
+            }
+        }
+    }
+
+    /// Whether HTTPS-only headers apply: the request came over HTTPS and is
+    /// not for a development host.
+    fn tls(&self, env: &Envelope, authority: Option<&str>) -> bool {
+        if env.client().scheme() != Scheme::Https {
+            return false;
+        }
+        let a = authority.unwrap_or("").to_ascii_lowercase();
+        !(self.site.development && is_dev_host(split_port(a.trim_end_matches('.')).0))
     }
 }
 
