@@ -14,10 +14,12 @@ use serve_net::{
 };
 
 use crate::assets::{self, Assets};
+use crate::cors::Cors;
 use crate::csrf;
 use crate::cx::{Out, is_local_target};
 use crate::error::{self, BuildError, Problem};
 use crate::headers::SecurityHeaders;
+use crate::policy::{CachePolicy, Cacheable, Compression, Served, compressible};
 use crate::route::{Access, BoxHandler, Group, Route};
 use crate::router::{self, Captures, Trie};
 use crate::url::{self, TrailingSlash};
@@ -45,6 +47,9 @@ pub enum Hook {
     /// After the handler succeeded, before the reply leaves: add headers.
     /// An error replaces the reply with the error page.
     Finish,
+    /// Inside [`Cx::render`], before the engine runs: choose a variant, add
+    /// headers. A hook that renders does not run these hooks again.
+    BeforeRender,
 }
 
 /// Which routes a hook runs for.
@@ -92,7 +97,7 @@ impl Routes {
     }
 }
 
-type HookFn<I> = Arc<dyn Fn(&mut Cx<'_, I>) -> Result + Send + Sync>;
+pub(crate) type HookFn<I> = Arc<dyn Fn(&mut Cx<'_, I>) -> Result + Send + Sync>;
 
 /// What [`App::classify`] tells a dispatcher before admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +127,7 @@ pub(crate) struct Shared {
     security: SecurityHeaders,
     pub(crate) csrf: Option<csrf_sec::Csrf>,
     pub(crate) redirect_hosts: Vec<Box<str>>,
+    compression: Option<Compression>,
 }
 
 /// Where a reply is going: the request's envelope, and whether security
@@ -130,6 +136,8 @@ pub(crate) struct Shared {
 pub(crate) struct At<'a> {
     pub(crate) env: &'a Envelope,
     pub(crate) tls: bool,
+    /// The client prefers JSON to HTML: error replies are JSON.
+    pub(crate) json: bool,
 }
 
 type ReadyFn = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -160,14 +168,18 @@ struct Entry<G: Gate> {
     template: Option<TemplateId>,
     csrf: bool,
     limits: form_net::Limits,
+    cors: Option<Arc<Cors>>,
+    cache: CachePolicy,
     routed: Box<[HookFn<G::Identity>]>,
     finish: Box<[HookFn<G::Identity>]>,
+    before_render: Box<[HookFn<G::Identity>]>,
 }
 
 struct Endpoint {
     /// Entry per method, by `Method::index`.
     methods: [Option<u32>; 10],
     allow: Box<str>,
+    set: MethodSet,
 }
 
 /// A web application: one site, its routes, and its gate. Built once at
@@ -247,6 +259,7 @@ pub struct Builder<G: Gate> {
     health: Vec<(String, Health)>,
     csrf: Option<csrf_sec::Csrf>,
     redirect_hosts: Vec<Box<str>>,
+    compression: Option<Compression>,
 }
 
 impl<G: Gate> Builder<G> {
@@ -269,7 +282,17 @@ impl<G: Gate> Builder<G> {
             health: Vec::new(),
             csrf: None,
             redirect_hosts: Vec::new(),
+            compression: None,
         }
+    }
+
+    /// Compress replies with gzip when the client accepts it: HTML, CSS,
+    /// JavaScript, JSON, XML, SVG, and other text, over a minimum size. Off
+    /// by default: a proxy in front usually compresses.
+    #[must_use]
+    pub fn compress(mut self, compression: Compression) -> Self {
+        self.compression = Some(compression);
+        self
     }
 
     /// CSRF protection with csrf-sec (re-exported as
@@ -623,11 +646,15 @@ impl<G: Gate> Builder<G> {
                 endpoints.push(Endpoint {
                     methods: [None; 10],
                     allow: Box::from(""),
+                    set: MethodSet::EMPTY,
                 });
             }
             let names: Box<[Box<str>]> = router::names(&parts).into();
             if r.csrf_exempt.is_some_and(|reason| reason.trim().is_empty()) {
                 problem(&r.pattern, "a CSRF exemption needs its reason".into());
+            }
+            if let Some(why) = r.cors.as_deref().and_then(Cors::problem) {
+                problem(&r.pattern, why.into());
             }
             if let Err(e) = r.form_limits.validate() {
                 problem(&r.pattern, format!("the form limits are inconsistent: {e}"));
@@ -670,8 +697,11 @@ impl<G: Gate> Builder<G> {
                     template,
                     csrf,
                     limits: r.form_limits,
+                    cors: r.cors.clone(),
+                    cache: r.cache,
                     routed: pick(Hook::Routed),
                     finish: pick(Hook::Finish),
+                    before_render: pick(Hook::BeforeRender),
                 });
             }
         }
@@ -694,6 +724,7 @@ impl<G: Gate> Builder<G> {
                 set = set.with(Method::Head);
             }
             set = set.with(Method::Options);
+            e.set = set;
             all = all.union(set);
             let mut v = Vec::new();
             set.write_allow(&mut v);
@@ -719,6 +750,7 @@ impl<G: Gate> Builder<G> {
                 security: self.security,
                 csrf: self.csrf,
                 redirect_hosts: self.redirect_hosts,
+                compression: self.compression,
             },
             site: self.site,
             trie,
@@ -797,7 +829,27 @@ enum Placed<'a> {
 impl<G: Gate> App<G> {
     /// Runs the whole pipeline for one request, authentication included.
     pub fn respond(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
-        self.run(req, env, None, reply)
+        self.serve(req, env, None, reply).outcome
+    }
+
+    /// Runs the pipeline and reports what ran and whether a cache in front
+    /// may keep the reply for guests. `who` is `Some` when the caller
+    /// authenticated already (as for
+    /// [`respond_identified`](Self::respond_identified)).
+    pub fn serve(
+        &self,
+        req: &HttpRequest<'_>,
+        env: &Envelope,
+        who: Option<&G::Identity>,
+        reply: &mut HttpReply,
+    ) -> Served {
+        let mut report = Served {
+            outcome: Outcome::Done,
+            route: None,
+            cache: Cacheable::No,
+        };
+        report.outcome = self.run(req, env, who, reply, &mut report);
+        report
     }
 
     /// Runs the pipeline for a request whose caller authenticated it
@@ -811,7 +863,7 @@ impl<G: Gate> App<G> {
         who: &G::Identity,
         reply: &mut HttpReply,
     ) -> Outcome {
-        self.run(req, env, Some(who), reply)
+        self.serve(req, env, Some(who), reply).outcome
     }
 
     /// Looks at a head before admission: which route would run and how it
@@ -955,6 +1007,7 @@ impl<G: Gate> App<G> {
         env: &Envelope,
         who: Option<&G::Identity>,
         reply: &mut HttpReply,
+        report: &mut Served,
     ) -> Outcome {
         let method = http.method();
         let raw_path = http.path();
@@ -962,6 +1015,7 @@ impl<G: Gate> App<G> {
         let at = At {
             env,
             tls: self.tls(env, authority),
+            json: wants_json(http.header("accept")),
         };
         if raw_path == "*" {
             if method == Method::Options {
@@ -1018,6 +1072,7 @@ impl<G: Gate> App<G> {
             host: host_raw,
             route: None,
             tls: at.tls,
+            json: at.json,
         };
 
         // Authentication, unless the caller did it.
@@ -1044,6 +1099,29 @@ impl<G: Gate> App<G> {
         let endpoint = &self.endpoints[ep as usize];
         let Some(idx) = self.entry_for(ep as usize, method) else {
             if method == Method::Options {
+                if let (Some(origin), Some(wanted)) = (
+                    http.header("origin"),
+                    http.header("access-control-request-method"),
+                ) {
+                    let wanted = Method::from_bytes(wanted);
+                    let cors = self
+                        .entry_for(ep as usize, wanted)
+                        .and_then(|i| self.entries[i as usize].cors.as_deref());
+                    if let Some(cors) = cors {
+                        let ok = cors.preflight(
+                            origin,
+                            wanted,
+                            http.header("access-control-request-headers"),
+                            endpoint.set,
+                            reply,
+                        );
+                        if !ok {
+                            self.event(EventKind::Refused, env, None, 204, "cors.denied", None);
+                        }
+                        self.secure(reply, at.tls, |_| false);
+                        return Outcome::Done;
+                    }
+                }
                 reply.status(204).header("allow", endpoint.allow.as_bytes());
                 self.secure(reply, at.tls, |_| false);
                 return Outcome::Done;
@@ -1062,6 +1140,7 @@ impl<G: Gate> App<G> {
         };
         let entry = &self.entries[idx as usize];
         req.route = Some(&entry.pattern);
+        report.route = Some(RouteId(idx));
 
         // Authorization.
         if let Access::Rule(rule) = &entry.access {
@@ -1145,6 +1224,7 @@ impl<G: Gate> App<G> {
             (csrf_state, binding),
             &mut out,
             reply,
+            &mut report.cache,
         );
         if self.shared.wipe {
             out.wipe();
@@ -1232,12 +1312,16 @@ impl<G: Gate> App<G> {
         (csrf_state, binding): (csrf::State, Option<&[u8]>),
         out: &mut Out,
         reply: &mut HttpReply,
+        cacheable: &mut Cacheable,
     ) -> Outcome {
         let at = At {
             env: req.env,
             tls: req.tls,
+            json: req.json,
         };
         let route = req.route;
+        let http = req.http;
+        let guest = who.is_guest();
         let (result, unverified) = {
             let mut cx = Cx {
                 req,
@@ -1250,6 +1334,8 @@ impl<G: Gate> App<G> {
                 csrf: csrf_state,
                 binding,
                 limits: &entry.limits,
+                before_render: &entry.before_render,
+                rendering: false,
             };
             let result = catch_unwind(AssertUnwindSafe(|| -> Result {
                 for h in entry.routed.iter() {
@@ -1280,6 +1366,28 @@ impl<G: Gate> App<G> {
                 Outcome::Done
             }
             Ok(Ok(())) if !out.invalid => {
+                if !out.has("cache-control") {
+                    if let Some(v) = entry.cache.value(guest) {
+                        out.header("cache-control", v.as_bytes());
+                    }
+                }
+                if let Some(c) = self.shared.compression {
+                    compress(c, http.header("accept-encoding"), out);
+                }
+                *cacheable = match entry.cache {
+                    CachePolicy::Guests { max_age } | CachePolicy::Public { max_age }
+                        if guest
+                            && matches!(http.method(), Method::Get | Method::Head)
+                            && out.status == 200
+                            && !out.has("set-cookie")
+                            && out
+                                .get("vary")
+                                .is_none_or(|v| v.eq_ignore_ascii_case(b"accept-encoding")) =>
+                    {
+                        Cacheable::Guests { max_age }
+                    }
+                    _ => Cacheable::No,
+                };
                 reply.status(out.status);
                 for &(ns, ne, vs, ve) in &out.spans {
                     let name = core::str::from_utf8(&out.names[ns as usize..ne as usize])
@@ -1288,6 +1396,9 @@ impl<G: Gate> App<G> {
                 }
                 if !out.has("x-content-type-options") {
                     reply.header("x-content-type-options", "nosniff");
+                }
+                if let Some(cors) = &entry.cors {
+                    cors.actual(http.header("origin"), reply);
                 }
                 self.secure(reply, at.tls, |n| out.has(n));
                 reply.body(&out.body);
@@ -1339,7 +1450,11 @@ impl<G: Gate> App<G> {
     /// A gate's denial as a response.
     fn deny(&self, d: Denial, req: &Request<'_>, reply: &mut HttpReply) {
         let env = req.env;
-        let at = At { env, tls: req.tls };
+        let at = At {
+            env,
+            tls: req.tls,
+            json: req.json,
+        };
         if d.kind() == DenialKind::SignIn {
             if let Some(page) = &self.shared.sign_in {
                 if matches!(req.method(), Method::Get | Method::Head) {
@@ -1417,6 +1532,17 @@ impl<G: Gate> App<G> {
         self.event(kind, at.env, route, status, code, source);
         let reference = RequestId::of(at.env).to_string();
         let mut body = Vec::with_capacity(512);
+        if at.json {
+            error::json_body(status, &reference, &mut body);
+            reply
+                .status(status)
+                .header("content-type", "application/json")
+                .header("x-content-type-options", "nosniff")
+                .header("cache-control", "no-store")
+                .body(&body);
+            self.secure(reply, at.tls, |_| false);
+            return;
+        }
         let mut done = false;
         if let (Some(engine), Some(&(_, t))) = (
             self.shared.render.as_deref(),
@@ -1458,6 +1584,35 @@ impl<G: Gate> App<G> {
         }
     }
 
+    /// How well this application claims a request, for [`Sites`](crate::Sites):
+    /// the host's rank (2 listed or an alias, 1 a development host, 0 any
+    /// host accepted) and the base path's length. `None`: not this site.
+    pub(crate) fn claim(&self, authority: Option<&str>, path: &str) -> Option<(u8, usize)> {
+        let lower = authority.unwrap_or("").to_ascii_lowercase();
+        let lower = lower.trim_end_matches('.');
+        let host_only = split_port(lower).0.trim_end_matches('.');
+        let listed = |list: &[Box<str>]| {
+            list.iter().any(|h| {
+                let h = h.as_ref();
+                h == lower || (split_port(h).1.is_none() && h == host_only)
+            })
+        };
+        let rank = if self.site.hosts.is_empty() {
+            0
+        } else if listed(&self.site.hosts) || listed(&self.site.aliases) {
+            2
+        } else if self.site.development && is_dev_host(host_only) {
+            1
+        } else {
+            return None;
+        };
+        let base = self.shared.base.as_ref();
+        let inside = base.is_empty()
+            || path == base
+            || path.strip_prefix(base).is_some_and(|r| r.starts_with('/'));
+        inside.then_some((rank, base.len()))
+    }
+
     /// Whether HTTPS-only headers apply: the request came over HTTPS and is
     /// not for a development host.
     fn tls(&self, env: &Envelope, authority: Option<&str>) -> bool {
@@ -1482,6 +1637,39 @@ impl<G: Gate> fmt::Debug for App<G> {
             .field("base", &self.shared.base)
             .field("routes", &self.entries.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// Whether the client prefers JSON to HTML (no `Accept`: HTML).
+fn wants_json(accept: Option<&[u8]>) -> bool {
+    accept.is_some() && parse_net::best_media(accept, &["text/html", "application/json"]) == Some(1)
+}
+
+/// gzip for a reply worth compressing that the client accepts. Adds `Vary`
+/// for every compressible reply, compressed or not, so caches keep the two
+/// apart.
+fn compress(c: Compression, accept_encoding: Option<&[u8]>, out: &mut Out) {
+    if out.status != 200 || out.has("content-encoding") {
+        return;
+    }
+    if !out.get("content-type").is_some_and(compressible) {
+        return;
+    }
+    if !out.has("vary") {
+        out.header("vary", b"accept-encoding");
+    }
+    let accepts = accept_encoding
+        .and_then(|v| parse_net::best_encoding(Some(v), &["gzip", "identity"]))
+        == Some(0);
+    if !accepts || out.body.len() < c.min_bytes {
+        return;
+    }
+    let level = compress_lib::Level::new(c.level).unwrap_or(compress_lib::Level::DEFAULT);
+    let packed = compress_lib::gzip::compress_with(&out.body, level);
+    if packed.len() < out.body.len() {
+        out.body.clear();
+        out.body.extend_from_slice(&packed);
+        out.header("content-encoding", b"gzip");
     }
 }
 

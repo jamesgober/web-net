@@ -76,6 +76,13 @@ impl Out {
             .push((ns, self.names.len() as u32, vs, self.values.len() as u32));
     }
 
+    pub(crate) fn get(&self, name: &str) -> Option<&[u8]> {
+        self.spans
+            .iter()
+            .find(|&&(s, e, _, _)| &self.names[s as usize..e as usize] == name.as_bytes())
+            .map(|&(_, _, vs, ve)| &self.values[vs as usize..ve as usize])
+    }
+
     pub(crate) fn has(&self, name: &str) -> bool {
         self.spans
             .iter()
@@ -116,6 +123,8 @@ pub struct Cx<'r, I> {
     pub(crate) csrf: crate::csrf::State,
     pub(crate) binding: Option<&'r [u8]>,
     pub(crate) limits: &'r form_net::Limits,
+    pub(crate) before_render: &'r [crate::app::HookFn<I>],
+    pub(crate) rendering: bool,
 }
 
 impl<'r, I> Cx<'r, I> {
@@ -438,6 +447,23 @@ impl<'r, I> Cx<'r, I> {
         self
     }
 
+    /// The best of `offers` for the request's `Accept-Language`
+    /// (`["en", "fr"]`), or `None` when the request states no preference
+    /// any offer meets.
+    #[must_use]
+    pub fn language(&self, offers: &[&'static str]) -> Option<&'static str> {
+        let i = parse_net::best_language(self.req.header("accept-language"), offers)?;
+        offers.get(i).copied()
+    }
+
+    /// The best of `offers` for the request's `Accept` (`["text/html",
+    /// "application/json"]`).
+    #[must_use]
+    pub fn media(&self, offers: &[&'static str]) -> Option<&'static str> {
+        let i = parse_net::best_media(self.req.header("accept"), offers)?;
+        offers.get(i).copied()
+    }
+
     /// Status, `content-type: text/html; charset=utf-8`, and the HTML.
     pub fn html(&mut self, status: u16, html: &str) -> &mut Self {
         self.content_type("text/html; charset=utf-8");
@@ -654,6 +680,14 @@ impl<'r, I> Cx<'r, I> {
             .render
             .as_deref()
             .ok_or_else(|| Error::internal("render.no_engine"))?;
+        if !self.rendering {
+            // Hooks may render too; they do not run their own hooks again.
+            self.rendering = true;
+            let hooks = self.before_render;
+            let ran = hooks.iter().try_for_each(|h| h(self));
+            self.rendering = false;
+            ran?;
+        }
         if let Some(cp) = &self.shared.checkpoint {
             match cp.check(self.req.env, Stage::BeforeRender) {
                 Verdict::Pass => {}

@@ -267,6 +267,21 @@ pub(crate) fn builtin_page(status: u16, reference: &str, out: &mut Vec<u8>) {
     out.extend_from_slice(b"</small></p></body></html>\n");
 }
 
+/// The error reply for a client that prefers JSON: the same facts as the
+/// page, no detail.
+pub(crate) fn json_body(status: u16, reference: &str, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"{\"status\":");
+    push_status(status, out);
+    out.extend_from_slice(b",\"title\":\"");
+    out.extend_from_slice(title(status).as_bytes());
+    out.extend_from_slice(b"\",\"message\":\"");
+    out.extend_from_slice(message(status).as_bytes());
+    out.extend_from_slice(b"\",\"reference\":\"");
+    // The reference is hex digits, a dash, and digits: nothing to escape.
+    out.extend_from_slice(reference.as_bytes());
+    out.extend_from_slice(b"\"}");
+}
+
 fn push_status(status: u16, out: &mut Vec<u8>) {
     let s = status.min(999);
     out.push(b'0' + (s / 100) as u8);
