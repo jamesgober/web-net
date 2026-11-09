@@ -13,6 +13,22 @@
 
 ---
 
+## [0.8.0] - 2026-11-09
+
+The alpha: the API as it should freeze.
+
+### Added
+
+- `Cx::next_path`: the sign-in redirect's `next`, only when it is a path of
+  this site.
+
+### Changed
+
+- `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]`:
+  read their fields; web-net makes them.
+
+---
+
 ## [0.7.0] - 2026-11-09
 
 Hardening.
@@ -249,7 +265,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jamesgober/web-net/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamesgober/web-net/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamesgober/web-net/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamesgober/web-net/compare/v0.4.0...v0.5.0

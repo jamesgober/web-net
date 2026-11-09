@@ -100,6 +100,7 @@ impl Routes {
 pub(crate) type HookFn<I> = Arc<dyn Fn(&mut Cx<'_, I>) -> Result + Send + Sync>;
 
 /// What [`App::classify`] tells a dispatcher before admission.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Classified {
     /// The route that will run, if one matched.

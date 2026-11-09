@@ -65,8 +65,12 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - [x] `Identity::set_cookie`, `Denial::with_cookie` (asked for by a gate implementation).
 - Moved to 0.9 (polish pass): fuzzing to 24 hours per target. Reason: the machine is shared and loaded; 0.7 ships after a shorter clean run, and the 0.9 polish pass runs both targets the full 24 hours on the final code.
 
-## v0.8.0 - Alpha
-- [ ] A template engine in use; a gate implementation in use; form-net's alpha routes running in web-net.
+## v0.8.0 - Alpha (DONE, 2026-11-09)
+- [x] A template engine in use: Luminess renders the example site's pages straight into the reply (`Cx::body_mut`, D-053).
+- [x] A gate implementation: gatekeeper-io's `impl web_net::Gate` (its feature `web-net`) compiles and builds an `App` against 0.8 with only its version pin moved (checked locally; gatekeeper-io is not on crates.io yet, so nothing in this repository depends on it).
+- [x] form-net's alpha routes (login urlencoded with its token; avatar multipart with the token before the file) run in web-net (`tests/actions.rs`, `examples/site.rs`).
+- [x] Freeze review of the public API: `#[non_exhaustive]` on the structs web-net makes (`Event`, `Served`, `Classified`, `Problem`); `Cx::next_path` for sign-in pages.
+- Not met, with reasons: a site running on web-net in production (needs the platform it serves to be deployed: James), and gatekeeper-io from crates.io (its repositories are James's to create).
 - [x] An example site with sign-in, a form, an upload, and static files (`examples/site.rs`, shipped in 0.7), rendered by Luminess through `Cx::body_mut`. Themed error pages wait for an engine that implements `Render`.
 
 ## v0.9.0 - Beta

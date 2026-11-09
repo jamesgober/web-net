@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party runtime dependencies.
     </p>
     <blockquote>
-        <strong>Status: <code>0.7.0</code>.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
+        <strong>Status: <code>0.8.0</code>, alpha.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
     </blockquote>
 </div>
 
@@ -40,7 +40,7 @@
 
 ```toml
 [dependencies]
-web-net = "0.7"
+web-net = "0.8"
 serve-net = "0.7"
 ```
 
@@ -104,7 +104,9 @@ Performance: the warm request path allocates nothing, route lookup does not grow
 
 Security: every threat the plan names has an attack test that must fail, the path rules have property tests, whole requests are fuzzed, and `docs/SECURITY.md` lists each defence.
 
-Coming next (see the roadmap): the alpha with a real gate and template engine in use (0.8), then the beta polish pass (0.9).
+`examples/site.rs` puts it together: sessions, sign-in with CSRF, an upload, static files, and pages rendered by Luminess.
+
+Coming next (see the roadmap): the beta polish pass (0.9).
 
 <hr>
 <br>

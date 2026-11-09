@@ -1,6 +1,6 @@
 # web-net - API Reference
 
-> Every public item in `web-net`, with examples. Version `0.7.0`.
+> Every public item in `web-net`, with examples. Version `0.8.0`.
 > Design and reasons: [`../dev/PLAN.md`](../dev/PLAN.md).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>
@@ -172,6 +172,7 @@ Named functions (`fn account(cx: &mut Cx<'_, User>) -> web_net::Result`) need no
 | `language(offers) -> Option<&str>` | the best `Accept-Language` match |
 | `media(offers) -> Option<&str>` | the best `Accept` match |
 | `see_other(path) -> Result` | 303 to a site-relative path |
+| `next_path() -> Result<Option<String>>` | the sign-in redirect's `next`, only when it is a path of this site |
 | `redirect(status, path) -> Result` | 301, 302, 303, 307, 308 to a site-relative path |
 | `redirect_external(status, url) -> Result` | to a host from `redirect_hosts` only |
 | `render(&dyn View) -> Result` | the route's template |

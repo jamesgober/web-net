@@ -561,6 +561,52 @@ impl<'r, I> Cx<'r, I> {
         self.redirect(303, path)
     }
 
+    /// The page a sign-in redirect asked for: the `next` query parameter
+    /// web-net puts on the redirect to the sign-in page, as a site-relative
+    /// path safe to pass to [`see_other`](Self::see_other) once the visitor
+    /// signed in. `None` when there is none, or when it is not a path of this
+    /// site (an attacker's link to the sign-in page cannot turn it into an
+    /// open redirect).
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .base("/app")
+    ///     .route(get("/login", |cx| {
+    ///         let next = cx.next_path()?.unwrap_or_else(|| "/".into());
+    ///         cx.text(200, &next);
+    ///         Ok(())
+    ///     }).public())
+    ///     .build()?;
+    /// let at = |q: &str| serve_net::testing::respond(&app, format!("GET /app/login?{q} HTTP/1.1\r\nHost: a\r\n\r\n").as_bytes()).text().to_owned();
+    /// assert_eq!(at("next=/app/account%3Ftab%3D2"), "/account?tab=2");
+    /// assert_eq!(at("next=//evil.example"), "/");
+    /// assert_eq!(at("next=/elsewhere"), "/");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`query`](Self::query): 400 when `next` is given twice or does not
+    /// decode.
+    pub fn next_path(&self) -> Result<Option<String>> {
+        let Some(next) = self.query("next")? else {
+            return Ok(None);
+        };
+        let base = self.shared.base.as_ref();
+        let rel = if base.is_empty() {
+            next.as_ref()
+        } else {
+            match next.strip_prefix(base) {
+                Some("") => "/",
+                Some(r) if r.starts_with('/') => r,
+                _ => return Ok(None),
+            }
+        };
+        Ok(is_local_target(rel).then(|| rel.to_owned()))
+    }
+
     /// A redirect to another site, only to a host listed with
     /// [`Builder::redirect_hosts`](crate::Builder::redirect_hosts):
     /// `https://` (or `http://`), the host, and a visible-ASCII rest.
