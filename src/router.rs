@@ -317,6 +317,78 @@ mod tests {
         assert_eq!(find(&t, "/a%20b"), Some((1, vec![])));
     }
 
+    mod props {
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        /// Whether `parts` matches the segments `segs` (the plain
+        /// definition, without the trie).
+        fn matches(parts: &[Part], segs: &[&str]) -> bool {
+            match (parts.first(), segs.first()) {
+                (None, None) => true,
+                (Some(Part::Wildcard(_)), _) => true,
+                (Some(Part::Static(l)), Some(s)) => l == s && matches(&parts[1..], &segs[1..]),
+                (Some(Part::Param(_)), Some(_)) => matches(&parts[1..], &segs[1..]),
+                _ => false,
+            }
+        }
+
+        fn pattern() -> impl Strategy<Value = String> {
+            let seg = prop_oneof![Just("a"), Just("b"), Just(":p"), Just("c")];
+            (proptest::collection::vec(seg, 0..4), any::<bool>()).prop_map(|(v, wild)| {
+                let mut p = String::new();
+                let mut n = 0;
+                for s in v {
+                    p.push('/');
+                    if s == ":p" {
+                        p.push_str(&format!(":p{n}"));
+                        n += 1;
+                    } else {
+                        p.push_str(s);
+                    }
+                }
+                if wild {
+                    p.push_str("/*w");
+                }
+                if p.is_empty() { "/".into() } else { p }
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn prop_lookup_is_sound_and_complete(
+                patterns in proptest::collection::vec(pattern(), 1..16),
+                path in proptest::collection::vec(prop_oneof![Just("a"), Just("b"), Just("c"), Just("d")], 0..6),
+            ) {
+                let mut t = Trie::default();
+                let mut table: Vec<Vec<Part>> = Vec::new();
+                for p in &patterns {
+                    let parts = parse(p).unwrap();
+                    let ep = t.insert(&parts, table.len() as u32) as usize;
+                    if ep == table.len() {
+                        table.push(parts);
+                    }
+                }
+                let path_str = format!("/{}", path.join("/"));
+                let path_str = if path.is_empty() { "/".to_owned() } else { path_str };
+                let found = t.find(&path_str);
+                let any = table.iter().any(|parts| matches(parts, &path));
+                match found {
+                    Some((ep, caps)) => {
+                        prop_assert!(matches(&table[ep as usize], &path), "{path_str} -> {patterns:?}");
+                        for i in 0..MAX_PARAMS {
+                            if let Some((s, e)) = caps.get(i) {
+                                prop_assert!(s <= e && e <= path_str.len());
+                            }
+                        }
+                    }
+                    None => prop_assert!(!any, "{path_str} matches a pattern of {patterns:?}"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_pattern_errors() {
         assert_eq!(parse("x"), Err(PatternError::NotAbsolute));

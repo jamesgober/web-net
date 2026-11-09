@@ -8,32 +8,18 @@
 //!    attacker's page cannot set. A cross-site request is refused here.
 //! 2. **A token bound to the visitor's session** (the identity's
 //!    [`csrf_binding`](crate::Identity::csrf_binding)): from the
-//!    `X-CSRF-Token` field, or from the `csrf_token` form field. A
-//!    urlencoded form's token is checked here, before the handler. A
-//!    multipart form's token is checked by [`Cx::form`](crate::Cx::form) or
-//!    [`Cx::upload`](crate::Cx::upload) in the same pass that reads the body,
-//!    before any file byte is stored; until then the raw body cannot be
-//!    read, and a handler that returns without reading it has its reply
-//!    replaced with 403.
+//!    `X-CSRF-Token` field, or from the `csrf_token` form field. Either way
+//!    it is checked here, before any hook or handler runs: a urlencoded body
+//!    is read with form-net's own parser; a multipart body up to its first
+//!    file part, where the token must already have come.
 //!
 //! Anything else (no binding, no token, another content type without the
 //! field) is refused with 403. The visitor sees a generic page; the reason
 //! goes to the events.
 
 use csrf_sec::{Csrf, Reason, RequestFacts};
-use form_net::{FormKind, Limits, Policy, Refusal, TokenCheck};
+use form_net::{FormKind, Inspector, Limits, PartHead, Policy, Refusal, TokenCheck, Verdict};
 use serve_net::HttpRequest;
-
-/// Where a request stands with CSRF.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum State {
-    /// Nothing to check (a safe method, or a route that opted out).
-    Off,
-    /// The token was verified.
-    Verified,
-    /// A multipart body: the token is verified while the form is read.
-    Pending,
-}
 
 /// The stable code for a csrf-sec refusal.
 pub(crate) const fn code(r: Reason) -> &'static str {
@@ -67,8 +53,25 @@ pub(crate) fn token_check<'a>(
 
 /// The form policy when the token comes in the body: it must come before
 /// any file part.
-pub(crate) const TOKEN_POLICY: Policy =
+const TOKEN_POLICY: Policy =
     Policy::DEFAULT.with_token_field(form_net::TokenField::new(csrf_sec::FIELD_NAME));
+
+/// The code that ends a multipart scan at the first file part: the token
+/// had to come before it, so nothing after it is read.
+const SCAN_DONE: &str = "web.token_scan_done";
+
+/// Stops a multipart scan at the first file part.
+struct StopAtFile;
+
+impl Inspector for StopAtFile {
+    fn part_start(&mut self, head: &PartHead<'_>) -> Verdict {
+        if head.is_file() {
+            Verdict::Refuse(Refusal::new(200, SCAN_DONE))
+        } else {
+            Verdict::Continue
+        }
+    }
+}
 
 /// Runs the checks for one unsafe request.
 ///
@@ -81,7 +84,7 @@ pub(crate) fn check(
     binding: Option<&[u8]>,
     own_origin: &str,
     limits: &Limits,
-) -> Result<State, &'static str> {
+) -> Result<(), &'static str> {
     let Some(binding) = binding.filter(|b| !b.is_empty()) else {
         return Err("csrf.no_binding");
     };
@@ -105,7 +108,7 @@ pub(crate) fn check(
         }
         return csrf
             .verify(binding, token)
-            .map(|_| State::Verified)
+            .map(|_| ())
             .map_err(|r| code(r.reason()));
     }
     let content_type = req.header("content-type").unwrap_or(b"");
@@ -118,14 +121,40 @@ pub(crate) fn check(
                 &Policy::DEFAULT,
                 &mut check,
             ) {
-                Ok(_) if check.verified() => Ok(State::Verified),
+                Ok(_) if check.verified() => Ok(()),
                 Ok(_) => Err("csrf.missing"),
                 Err(e) if e.code().starts_with("csrf.") => Err(e.code()),
                 // A body that does not parse cannot carry a token.
                 Err(_) => Err("csrf.unreadable_form"),
             }
         }
-        Ok(FormKind::Multipart(_)) => Ok(State::Pending),
+        Ok(FormKind::Multipart(_)) => {
+            // The token part comes before any file part (TOKEN_POLICY), so
+            // the scan stops at the first file: an upload is not read twice.
+            let mut check = token_check(csrf, binding);
+            let scanned = form_net::parse_multipart_inspected(
+                content_type,
+                req.body_bytes(),
+                limits,
+                &TOKEN_POLICY,
+                &mut (&mut check, StopAtFile),
+            );
+            // The specific refusals first: a second token is refused even
+            // after a first one verified.
+            // Only a complete scan, or one stopped at the first file part,
+            // can count; every other error refuses, even after a token
+            // verified (a second token, a malformed part).
+            match scanned {
+                Ok(_) if check.verified() => Ok(()),
+                Err(e) if e.code() == SCAN_DONE && check.verified() => Ok(()),
+                Ok(_) => Err("csrf.missing"),
+                Err(e) if e.code() == SCAN_DONE => Err("csrf.missing"),
+                Err(e) if e.code().starts_with("csrf.") => Err(e.code()),
+                Err(e) if e.code() == "policy.duplicate_token" => Err("csrf.duplicate"),
+                Err(e) if e.code() == "policy.token_field_late" => Err("csrf.missing"),
+                Err(_) => Err("csrf.unreadable_form"),
+            }
+        }
         _ => Err("csrf.missing"),
     }
 }

@@ -186,6 +186,9 @@ fn test_trailing_slash_policies() {
     assert_eq!((r.status, loc(&r)), (301, "/a/"));
     assert_eq!(get_req(&add, "/a/").text(), "a");
     assert_eq!(get_req(&add, "/s.css").text(), "css");
+    // A file-like path has one spelling under Add too: no slash.
+    let r = get_req(&add, "/s.css/");
+    assert_eq!((r.status, loc(&r)), (301, "/s.css"));
 
     let ignore = mk(TrailingSlash::Ignore);
     assert_eq!(get_req(&ignore, "/a").text(), "a");

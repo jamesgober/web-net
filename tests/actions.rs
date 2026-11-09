@@ -291,30 +291,49 @@ fn multipart(token: &str, file: bool) -> Vec<u8> {
 const MP: &str = "multipart/form-data; boundary=B";
 
 #[test]
-fn test_multipart_token_is_checked_while_the_form_is_read() {
+fn test_multipart_token_is_checked_before_the_handler() {
     let log: &'static Log = Box::leak(Box::default());
     let app = app(log);
     let t = token(&app, "s1");
     let r = post_to(&app, "/email", Some("s1"), "", MP, &multipart(&t, false));
     assert_eq!((r.status, r.text()), (200, "m@b.example"));
-    let r = post_to(
-        &app,
-        "/email",
-        Some("s1"),
-        "",
-        MP,
-        &multipart("forged", false),
-    );
-    assert_eq!(r.status, 403);
-    // The raw body is not handed out before the token was checked.
+    // A handler that never reads its body runs only with a verified token.
+    let r = post_to(&app, "/lazy", Some("s1"), "", MP, &multipart(&t, true));
+    assert_eq!((r.status, r.text()), (200, "changed"));
     let r = post_to(&app, "/raw", Some("s1"), "", MP, &multipart(&t, false));
-    assert_eq!(r.status, 403);
-    // A handler that never reads its multipart form: nothing it wrote leaves.
-    let r = post_to(&app, "/lazy", Some("s1"), "", MP, &multipart(&t, false));
-    assert_eq!(r.status, 403);
-    assert!(r.header("set-cookie").is_none());
-    let last = *log.0.lock().unwrap().last().unwrap();
-    assert_eq!(last, (EventKind::Failed, 403, "csrf.unverified"));
+    assert_eq!(r.status, 200);
+    // Forged, missing, or after a file: refused before the handler runs, so
+    // a handler with side effects (a delete) never starts.
+    let no_token = b"--B\r\nContent-Disposition: form-data; name=x\r\n\r\ny\r\n--B--".to_vec();
+    let file_first = {
+        let mut b =
+            b"--B\r\nContent-Disposition: form-data; name=doc; filename=a.txt\r\n\r\nhello\r\n"
+                .to_vec();
+        b.extend_from_slice(
+            format!("--B\r\nContent-Disposition: form-data; name=csrf_token\r\n\r\n{t}\r\n--B--")
+                .as_bytes(),
+        );
+        b
+    };
+    // A valid token, then a second one: refused, as on the urlencoded and
+    // header paths (form-net's review).
+    let two_tokens = format!(
+        "--B\r\nContent-Disposition: form-data; name=csrf_token\r\n\r\n{t}\r\n--B\r\nContent-Disposition: form-data; name=csrf_token\r\n\r\nOTHER\r\n--B\r\nContent-Disposition: form-data; name=doc; filename=a.txt\r\n\r\nhi\r\n--B--"
+    )
+    .into_bytes();
+    for (body, code) in [
+        (multipart("forged", false), "csrf.malformed"),
+        (no_token, "csrf.missing"),
+        (b"--B--".to_vec(), "csrf.missing"),
+        (file_first, "csrf.missing"),
+        (two_tokens, "csrf.duplicate"),
+    ] {
+        let r = post_to(&app, "/lazy", Some("s1"), "", MP, &body);
+        assert_eq!(r.status, 403, "{code}");
+        assert!(r.header("set-cookie").is_none());
+        let last = *log.0.lock().unwrap().last().unwrap();
+        assert_eq!(last, (EventKind::Denied, 403, code));
+    }
 }
 
 #[test]

@@ -10,6 +10,7 @@
 //! then resolved and must still be inside the folder, so a symbolic link
 //! cannot lead out of it.
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -26,6 +27,102 @@ pub const INLINE_LIMIT: u64 = 1 << 20;
 
 /// The size of one part of a file sent in parts.
 const PART: usize = 64 << 10;
+
+/// How a reply in parts that cannot finish ends: serve-net answers a
+/// `Deferred` without `reply.defer()` with a refusal, and a refusal once
+/// the head has left closes the connection abortively, so the client sees
+/// a cut-short body and never a clean end with the wrong bytes.
+/// (`Outcome::Close` would end the chunked body cleanly.) serve-net is
+/// asked for an explicit abort (PLAN O-7).
+const ABORT: Outcome = Outcome::Deferred;
+
+/// A request whose large file is going out in parts: its connection and
+/// request number.
+pub(crate) type StreamKey = (u64, u32);
+
+/// The most replies in parts one thread follows at once; past it the oldest
+/// is forgotten (and its next part closes its connection).
+const MAX_IN_FLIGHT: usize = 256;
+
+thread_local! {
+    /// The entity tag of each large file going out in parts on this thread.
+    /// A reply in parts stays on the worker that owns its connection, so
+    /// every part of it comes back to the same thread. A later part whose
+    /// file no longer has that tag ends the connection, never the reply.
+    static IN_FLIGHT: RefCell<Vec<(StreamKey, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn begin(key: StreamKey, tag: &str) {
+    IN_FLIGHT.with(|m| {
+        let mut m = m.borrow_mut();
+        m.retain(|(k, _)| *k != key);
+        if m.len() >= MAX_IN_FLIGHT {
+            m.remove(0);
+        }
+        m.push((key, tag.to_owned()));
+    });
+}
+
+fn end(key: StreamKey) {
+    IN_FLIGHT.with(|m| m.borrow_mut().retain(|(k, _)| *k != key));
+}
+
+/// The entity tag of the file this request is sending in parts, if a part
+/// of it has gone out already.
+pub(crate) fn continuing(key: StreamKey) -> Option<String> {
+    IN_FLIGHT.with(|m| {
+        m.borrow()
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, t)| t.clone())
+    })
+}
+
+/// The next part of a reply in parts. `found` is the file resolved again
+/// for this part, `None` when it is gone; a file that changed (another tag)
+/// or went away ends the connection.
+pub(crate) fn next_part(
+    key: StreamKey,
+    tag: &str,
+    found: Option<&Found>,
+    req: &HttpRequest<'_>,
+    reply: &mut HttpReply,
+) -> Outcome {
+    let Some(found) = found.filter(|f| etag(f) == tag) else {
+        end(key);
+        return ABORT;
+    };
+    let (start, len) = match req.header("range").map(|v| {
+        let mut out = [ByteRange { start: 0, end: 0 }];
+        (parse_net::byte_ranges(v, found.len, &mut out), out[0])
+    }) {
+        Some((Ok(RangeOutcome::Ranges(1)), r)) if if_range_holds(found, tag, req) => {
+            (r.start, r.end - r.start + 1)
+        }
+        _ => (0, found.len),
+    };
+    let sent = reply.stream().sent();
+    let outcome = send_part(found, start, len, sent, reply);
+    if outcome != Outcome::More {
+        end(key);
+    }
+    outcome
+}
+
+/// Whether the request's `If-Range` (if any) holds for the file: the same
+/// test the first part made.
+fn if_range_holds(found: &Found, tag: &str, req: &HttpRequest<'_>) -> bool {
+    let Some(v) = req.header("if-range") else {
+        return true;
+    };
+    let current = EntityTag::strong(&tag.as_bytes()[1..tag.len() - 1]).ok();
+    let modified = found
+        .modified
+        .and_then(|m| HttpDate::from_system_time(m).ok());
+    parse_net::range::parse_if_range(v)
+        .map(|ir| ir.matches(current.as_ref(), modified))
+        .unwrap_or(false)
+}
 
 /// A folder served under a mount path.
 ///
@@ -109,13 +206,31 @@ impl Assets {
 /// Windows device names, refused everywhere so a site behaves the same on
 /// every system.
 fn is_device_name(seg: &str) -> bool {
-    let stem = seg.split('.').next().unwrap_or(seg).to_ascii_uppercase();
-    matches!(
+    // Windows ignores spaces before the extension (`CON .txt`) and takes
+    // superscript digits as port numbers (`COM¹`).
+    let stem = seg
+        .split('.')
+        .next()
+        .unwrap_or(seg)
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(
         stem.as_str(),
         "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-    ) || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-        && stem.len() == 4
-        && stem.as_bytes()[3].is_ascii_digit())
+    ) {
+        return true;
+    }
+    let Some(port) = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+    else {
+        return false;
+    };
+    let mut chars = port.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('0'..='9' | '¹' | '²' | '³'), None)
+    )
 }
 
 /// Whether a decoded segment may name a file.
@@ -148,11 +263,11 @@ pub(crate) fn find(assets: &Assets, rel: &str, accept_encoding: Option<&[u8]>) -
         }
         path.push(seg.as_ref());
     }
-    let mut meta = inside(&assets.root, &path)?;
+    let mut meta = inside(&assets.root, &path, assets.hidden)?;
     if meta.1.is_dir() {
         let index = assets.index.as_deref()?;
         path = meta.0.join(index);
-        meta = inside(&assets.root, &path)?;
+        meta = inside(&assets.root, &path, assets.hidden)?;
     }
     let (file, md) = meta;
     if !md.is_file() {
@@ -182,7 +297,7 @@ pub(crate) fn find(assets: &Assets, rel: &str, accept_encoding: Option<&[u8]>) -
             let mut alt = found.path.clone().into_os_string();
             alt.push(".");
             alt.push(ext);
-            if let Some((p, m)) = inside(&assets.root, Path::new(&alt)) {
+            if let Some((p, m)) = inside(&assets.root, Path::new(&alt), assets.hidden) {
                 if m.is_file() {
                     found.path = p;
                     found.len = m.len();
@@ -196,10 +311,19 @@ pub(crate) fn find(assets: &Assets, rel: &str, accept_encoding: Option<&[u8]>) -
 }
 
 /// Resolves `path` and checks it is still under `root` (both canonical).
-fn inside(root: &Path, path: &Path) -> Option<(PathBuf, std::fs::Metadata)> {
+fn inside(root: &Path, path: &Path, hidden: bool) -> Option<(PathBuf, std::fs::Metadata)> {
     let real = std::fs::canonicalize(path).ok()?;
-    if !real.starts_with(root) {
-        return None;
+    let below = real.strip_prefix(root).ok()?;
+    // The resolved names are checked again: a request may name a file by
+    // another spelling the file system resolves (a Windows 8.3 short name
+    // such as `ENVSEC~1` for `.envsecret`, or a link inside the folder).
+    for part in below.components() {
+        let std::path::Component::Normal(name) = part else {
+            return None;
+        };
+        if !name.to_str().is_some_and(|n| safe_segment(n, hidden)) {
+            return None;
+        }
     }
     let md = std::fs::metadata(&real).ok()?;
     Some((real, md))
@@ -220,13 +344,15 @@ fn etag(found: &Found) -> String {
     format!("\"{:x}-{:x}{coding}\"", found.len, nanos)
 }
 
-/// Answers a request for a file.
+/// Answers a request for a file. `None` when the file could not be read
+/// (nothing was written; the caller answers 500).
 pub(crate) fn serve(
     assets: &Assets,
     found: &Found,
+    key: StreamKey,
     req: &HttpRequest<'_>,
     reply: &mut HttpReply,
-) -> Outcome {
+) -> Option<Outcome> {
     let tag = etag(found);
     let opaque = &tag.as_bytes()[1..tag.len() - 1];
     let current = EntityTag::strong(opaque).ok();
@@ -252,13 +378,13 @@ pub(crate) fn serve(
     if let (Some(inm), Some(cur)) = (req.header("if-none-match"), current.as_ref()) {
         if parse_net::if_none_match(inm, cur).unwrap_or(false) {
             head(reply, 304);
-            return Outcome::Done;
+            return Some(Outcome::Done);
         }
     } else if let (Some(ims), Some(lm)) = (req.header("if-modified-since"), last_modified) {
         if let Ok(since) = parse_net::http_date(ims) {
             if lm <= since {
                 head(reply, 304);
-                return Outcome::Done;
+                return Some(Outcome::Done);
             }
         }
     }
@@ -267,12 +393,7 @@ pub(crate) fn serve(
     let mut range: Option<ByteRange> = None;
     if req.method() == Method::Get {
         if let Some(value) = req.header("range") {
-            let if_range_ok = match req.header("if-range") {
-                None => true,
-                Some(v) => parse_net::range::parse_if_range(v)
-                    .map(|ir| ir.matches(current.as_ref(), last_modified))
-                    .unwrap_or(false),
-            };
+            let if_range_ok = if_range_holds(found, &tag, req);
             if if_range_ok {
                 let mut out = [ByteRange { start: 0, end: 0 }];
                 match parse_net::byte_ranges(value, found.len, &mut out) {
@@ -280,7 +401,7 @@ pub(crate) fn serve(
                     Ok(RangeOutcome::Unsatisfiable) => {
                         head(reply, 416);
                         reply.header("content-range", format!("bytes */{}", found.len));
-                        return Outcome::Done;
+                        return Some(Outcome::Done);
                     }
                     _ => {}
                 }
@@ -291,6 +412,14 @@ pub(crate) fn serve(
     let (status, start, len) = match range {
         Some(r) => (206, r.start, r.end - r.start + 1),
         None => (200, 0, found.len),
+    };
+    // Read (or at least open) the file before any field is written, so a
+    // file that cannot be read leaves an empty reply for the 500.
+    let inline = if len <= INLINE_LIMIT {
+        Some(read_at(&found.path, start, len as usize)?)
+    } else {
+        drop(File::open(&found.path).ok()?);
+        None
     };
     head(reply, status);
     reply
@@ -305,35 +434,24 @@ pub(crate) fn serve(
             format!("bytes {}-{}/{}", r.start, r.end, found.len),
         );
     }
-    if req.method() == Method::Head {
-        // The length is the body's: read nothing for a small file's HEAD
-        // beyond what the GET would send.
-        if len <= INLINE_LIMIT {
-            return match read_at(&found.path, start, len as usize) {
-                Some(bytes) => {
-                    reply.body(&bytes);
-                    Outcome::Done
-                }
-                None => fail(reply),
-            };
-        }
-        reply.stream();
-        return Outcome::Done;
+    // A small file goes whole (for HEAD too: its length is the body's).
+    if let Some(bytes) = inline {
+        reply.body(&bytes);
+        return Some(Outcome::Done);
     }
-    if len <= INLINE_LIMIT {
-        return match read_at(&found.path, start, len as usize) {
-            Some(bytes) => {
-                reply.body(&bytes);
-                Outcome::Done
-            }
-            None => fail(reply),
-        };
+    if req.method() == Method::Head {
+        reply.stream();
+        return Some(Outcome::Done);
     }
     // Sent in parts: serve-net calls again for each part, with the same
     // request; `sent` says where the next part starts. The status and fields
     // set above leave with the first part only.
-    let sent = reply.stream().sent();
-    send_part(found, start, len, sent, reply)
+    begin(key, &tag);
+    let outcome = send_part(found, start, len, 0, reply);
+    if outcome != Outcome::More {
+        end(key);
+    }
+    Some(outcome)
 }
 
 fn send_part(found: &Found, start: u64, len: u64, sent: u64, reply: &mut HttpReply) -> Outcome {
@@ -342,11 +460,11 @@ fn send_part(found: &Found, start: u64, len: u64, sent: u64, reply: &mut HttpRep
     }
     let want = (len - sent).min(PART as u64) as usize;
     let Some(bytes) = read_at(&found.path, start + sent, want) else {
-        return Outcome::Close;
+        return ABORT;
     };
     if bytes.len() != want {
         // Shorter than its length now: the file changed under the reply.
-        return Outcome::Close;
+        return ABORT;
     }
     reply.stream().send(&bytes);
     if sent + want as u64 >= len {
@@ -364,11 +482,6 @@ fn read_at(path: &Path, start: u64, len: usize) -> Option<Vec<u8>> {
     let mut buf = Vec::with_capacity(len);
     f.take(len as u64).read_to_end(&mut buf).ok()?;
     Some(buf)
-}
-
-fn fail(reply: &mut HttpReply) -> Outcome {
-    reply.text(500, "the file could not be read");
-    Outcome::Done
 }
 
 /// The media type for a file name, by extension. Text types carry UTF-8.

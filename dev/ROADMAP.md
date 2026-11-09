@@ -56,19 +56,23 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - [x] The router at 10,000 routes (`tests/scale.rs`).
 - Moved to 0.9 (polish pass): the quiet-machine rerun with the per-step split, because the machine stayed loaded by other jobs through this release; numbers taken under load are kept only as relative. Moved to when serve-net offers it: the reply buffer API (PLAN O-4).
 
-## v0.7.0 - Hardening
-- [ ] Attack tests for every threat in PLAN section 13.
-- [ ] Property tests: two spellings reach one route; normalization idempotent and never above the root.
-- [ ] Fuzz targets: normalization, routing, query decoding, cookie reading; 24 hours each, no findings.
-- [ ] `docs/SECURITY.md`.
+## v0.7.0 - Hardening (DONE, 2026-11-09)
+- [x] Attack tests for every threat in PLAN section 13 (`tests/attacks.rs`, T-1 to T-15).
+- [x] Property tests: every spelling reaches one path; normalization idempotent and clean; decoding inverts encoding; lookup sound and complete.
+- [x] Fuzz targets `request` (normalization, routing, gates, cookies, query, CSRF, forms through whole requests) and `path` (no redirect loops, no gate bypass). See the release notes for the hours run.
+- [x] `docs/SECURITY.md`.
+- [x] An independent adversarial review of `src/`, findings fixed test-first.
+- [x] `Identity::set_cookie`, `Denial::with_cookie` (asked for by a gate implementation).
+- Moved to 0.9 (polish pass): fuzzing to 24 hours per target. Reason: the machine is shared and loaded; 0.7 ships after a shorter clean run, and the 0.9 polish pass runs both targets the full 24 hours on the final code.
 
 ## v0.8.0 - Alpha
-- [ ] A template engine implementing `Render` in use; a gate implementation in use; form-net's alpha routes running in web-net.
-- [ ] An example site with sign-in, a form, an upload, static files, and themed error pages.
+- [ ] A template engine in use; a gate implementation in use; form-net's alpha routes running in web-net.
+- [x] An example site with sign-in, a form, an upload, and static files (`examples/site.rs`, shipped in 0.7), rendered by Luminess through `Cx::body_mut`. Themed error pages wait for an engine that implements `Render`.
 
 ## v0.9.0 - Beta
 - [ ] Pre-1.0 polish pass: every accepted gap, deferred item, and missed target revisited.
 - [ ] Benchmarks on a quiet machine, with the per-step split (moved from 0.6).
+- [ ] Both fuzz targets 24 hours on the final code (moved from 0.7).
 - [ ] Adversarial review, findings fixed test-first.
 - [ ] `dev/READINESS-1.0.md` for James.
 

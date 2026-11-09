@@ -383,6 +383,101 @@ mod tests {
         assert_eq!(decode("plain"), "plain");
     }
 
+    mod props {
+        use proptest::prelude::*;
+
+        use super::super::*;
+
+        /// Bytes a request target can carry in a path (what http-net lets
+        /// through), with `%` escapes in both cases.
+        fn raw_path() -> impl Strategy<Value = String> {
+            let piece = prop_oneof![
+                Just("/".to_owned()),
+                Just("//".to_owned()),
+                Just("/./".to_owned()),
+                Just("/../".to_owned()),
+                Just(".".to_owned()),
+                Just("..".to_owned()),
+                "[a-zA-Z0-9._~!$&'()*+,;=:@-]{1,6}",
+                (0u8..=255).prop_map(|b| format!("%{b:02X}")),
+                (0u8..=255).prop_map(|b| format!("%{b:02x}")),
+            ];
+            proptest::collection::vec(piece, 0..12).prop_map(|v| format!("/{}", v.concat()))
+        }
+
+        /// A segment's bytes as decoded text: no `/`, `\\`, or control.
+        fn segment() -> impl Strategy<Value = String> {
+            "[^/\\\\\\x00-\\x1f\\x7f]{1,8}"
+                .prop_filter("not a dot segment", |s| s != "." && s != "..")
+        }
+
+        /// One way to spell a segment: each byte plain or escaped, hex in
+        /// either case.
+        fn spell(seg: &str, choices: &[u8]) -> String {
+            let mut out = String::new();
+            for (i, &b) in seg.as_bytes().iter().enumerate() {
+                let c = choices.get(i).copied().unwrap_or(0);
+                if is_plain(b) && c % 3 == 0 {
+                    out.push(b as char);
+                } else if c % 3 == 1 {
+                    out.push_str(&format!("%{b:02x}"));
+                } else {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+            out
+        }
+
+        proptest! {
+            #[test]
+            fn prop_normalize_is_idempotent_and_clean(p in raw_path()) {
+                if let Ok(c) = normalize(&p, false) {
+                    let again = normalize(&c, false).unwrap();
+                    prop_assert!(matches!(again, Cow::Borrowed(_)), "{p} -> {c} -> {again}");
+                    prop_assert!(c.starts_with('/'));
+                    for bad in ["//", "/./", "/../"] {
+                        prop_assert!(!c.contains(bad), "{p} -> {c}");
+                    }
+                    prop_assert!(!c.ends_with("/.") && !c.ends_with("/.."), "{p} -> {c}");
+                    let decoded = decode(&c);
+                    prop_assert!(!decoded.contains('\\') && !decoded.chars().any(char::is_control));
+                }
+            }
+
+            #[test]
+            fn prop_every_spelling_reaches_one_path(
+                segs in proptest::collection::vec(segment(), 1..5),
+                choices in proptest::collection::vec(any::<u8>(), 64),
+                noise in proptest::collection::vec(0u8..4, 5),
+            ) {
+                let mut canonical = String::new();
+                let mut spelled = String::new();
+                for (i, s) in segs.iter().enumerate() {
+                    canonical.push('/');
+                    encode_segment(s.as_bytes(), &mut canonical);
+                    match noise[i % noise.len()] {
+                        1 => spelled.push_str("/."),
+                        2 => spelled.push_str("/x/.."),
+                        3 => spelled.push('/'),
+                        _ => {}
+                    }
+                    spelled.push('/');
+                    spelled.push_str(&spell(s, &choices[i * 8 % 56..]));
+                }
+                let n = normalize(&spelled, false).unwrap();
+                prop_assert_eq!(n.as_ref(), canonical.as_str(), "{}", spelled);
+            }
+
+            #[test]
+            fn prop_decode_inverts_encode(s in "\\PC{0,16}") {
+                let mut e = String::new();
+                encode_segment(s.as_bytes(), &mut e);
+                let d = decode(&e);
+                prop_assert_eq!(d.as_ref(), s.as_str());
+            }
+        }
+    }
+
     #[test]
     fn test_too_many_segments() {
         let long = "/a".repeat(MAX_SEGMENTS + 1);

@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "web-net"
-version = "0.6.0"
+version = "0.7.0"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -14,6 +14,9 @@ license = "Apache-2.0 OR MIT"
 
 # Readme
 readme = "README.md"
+
+# The fuzz crate is not part of the package.
+exclude = ["fuzz/"]
 
 # Description
 description = "Web layer on serve-net: URL normalization, sites and base paths, a compiled router with 404 and 405, gate checkpoints for authentication and authorization, hooks, error pages, and a render trait that reads typed views."
@@ -71,6 +74,13 @@ compress-lib = { version = "0.9", default-features = false }
 # #################################
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
+# The example site renders with Luminess (first party, zero dependencies).
+luminess = "0.7"
+
+[[example]]
+name = "site"
+required-features = ["uploads"]
 
 [[bench]]
 name = "web"

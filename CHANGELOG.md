@@ -13,6 +13,71 @@
 
 ---
 
+## [0.7.0] - 2026-11-09
+
+Hardening.
+
+### Added
+
+- `tests/attacks.rs`: one attack per threat (T-1 to T-15), each must fail.
+- Property tests for path normalization (idempotent, clean, every spelling
+  reaches one path, decoding inverts encoding) and route lookup (sound and
+  complete).
+- Fuzz targets `request` and `path` (`fuzz/`, not in the package).
+- `docs/SECURITY.md`.
+- `Identity::set_cookie`: a cookie the gate sets leaves on every exit of
+  `App::respond`, once (not with `respond_identified`, whose caller writes
+  its own); such replies are never reported keepable.
+- `Denial::with_cookie` and `Denial::cookie`.
+- `Cx::body_mut`, for an engine that writes into a `Vec<u8>` itself.
+
+- `examples/site.rs` (feature `uploads`): a small site with sessions, a
+  pre-session id, sign-in with CSRF, an upload, static files, and Luminess
+  pages.
+
+### Fixed
+
+From an independent adversarial review:
+
+- A multipart CSRF token was checked after the handler had run; it is now
+  checked before any hook or handler, like a urlencoded one.
+- A reply that sets a cookie was sent `public` under the `Public` and
+  `Guests` policies; it is now `private, no-store`.
+- `App::serve` reported replies keepable whose handler set its own
+  `Cache-Control`, or whose route has a CORS policy.
+- A Windows 8.3 short name (`ENVSEC~1`) reached a dot file in an `Assets`
+  folder; resolved names are now checked too.
+- A file that could not be read left a 500 carrying the file's validators
+  and cache lifetime; a file gone between parts got an error page inside it.
+- A preflight listed the path's methods without a CORS policy.
+- An empty `Host` passed a site's declared hosts; it is a 421.
+- `COM¹`, `LPT³`, `CON .txt` as asset names, and `/style.css/` under
+  `TrailingSlash::Add`.
+
+From a second review:
+
+- A large file changed or removed between the parts of its reply could end
+  as if complete with the wrong bytes; the connection is now closed
+  abortively.
+- The gate's cookie (a stale session cleared) was written after the
+  handler's and could cancel a fresh sign-in; it now goes first, and is
+  dropped when the handler sets the same cookie.
+- A handler's `Cache-Control: public` could leave beside the gate's
+  pre-session cookie; any reply with a cookie is now `private, no-store`.
+- Health paths answer under `TrailingSlash::Add`.
+- CORS preflights are answered before authentication.
+- In the multipart CSRF scan, a second token is refused even after a first
+  one verified.
+
+### Changed
+
+- `OPTIONS *` to a host the site does not serve is a 421.
+- `Denial` is `Clone` but no longer `Copy` (it can carry a cookie).
+- `Cx::body` no longer refuses multipart bodies: their token was checked
+  before the handler.
+
+---
+
 ## [0.6.0] - 2026-11-08
 
 Performance.
@@ -184,7 +249,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/jamesgober/web-net/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamesgober/web-net/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamesgober/web-net/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamesgober/web-net/compare/v0.3.0...v0.4.0

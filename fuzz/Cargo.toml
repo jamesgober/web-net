@@ -1,0 +1,34 @@
+[package]
+name = "web-net-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serve-net = { version = "0.7.1", default-features = false, features = ["http1"] }
+web-net = { path = ".." }
+
+# Its own workspace, so the library's builds never include it.
+[workspace]
+members = ["."]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "request"
+path = "fuzz_targets/request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "path"
+path = "fuzz_targets/path.rs"
+test = false
+doc = false
+bench = false
