@@ -1758,9 +1758,18 @@ impl<G: Gate, E: Render> App<G, E> {
             return None;
         };
         let base = self.shared.base.as_ref();
+        // A site with lower-case paths claims `/BLOG/x` too: it redirects it
+        // to `/blog/x` itself, instead of another site answering it.
+        let head = path.get(..base.len());
+        let starts = head.is_some_and(|h| {
+            if self.site.lowercase {
+                h.eq_ignore_ascii_case(base)
+            } else {
+                h == base
+            }
+        });
         let inside = base.is_empty()
-            || path == base
-            || path.strip_prefix(base).is_some_and(|r| r.starts_with('/'));
+            || (starts && matches!(path.as_bytes().get(base.len()), None | Some(b'/')));
         inside.then_some((rank, base.len()))
     }
 

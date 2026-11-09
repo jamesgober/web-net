@@ -479,3 +479,32 @@ fn test_sites_pick_by_host_and_base() {
     assert!(at("example.com", "/blogger").contains("Not Found"));
     assert_eq!(at("other.example", "/"), "fallback");
 }
+
+#[test]
+fn test_sites_lowercase_site_claims_its_upper_case_paths() {
+    let main = App::builder()
+        .route(
+            get("/", |cx| {
+                cx.text(200, "main");
+                Ok(())
+            })
+            .public(),
+        )
+        .build()
+        .unwrap();
+    let blog = App::builder()
+        .base("/blog")
+        .lowercase_paths()
+        .route(
+            get("/x", |cx| {
+                cx.text(200, "x");
+                Ok(())
+            })
+            .public(),
+        )
+        .build()
+        .unwrap();
+    let sites = web_net::Sites::new().site(main).site(blog);
+    let r = send(&sites, "GET /BLOG/X HTTP/1.1\r\nHost: a");
+    assert_eq!((r.status, h(&r, "location")), (301, "/blog/x"));
+}
