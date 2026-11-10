@@ -1,6 +1,6 @@
 # web-net - API Reference
 
-> Every public item in `web-net`, with examples. Version `0.8.0`.
+> Every public item in `web-net`, with examples. Version `0.9.0`.
 > Design and reasons: [`../dev/PLAN.md`](../dev/PLAN.md).
 
 <sub>Copyright &copy; 2026 <strong>James Gober</strong>.</sub>

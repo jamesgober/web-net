@@ -73,12 +73,22 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - Not met, with reasons: a site running on web-net in production (needs the platform it serves to be deployed: James), and gatekeeper-io from crates.io (its repositories are James's to create).
 - [x] An example site with sign-in, a form, an upload, and static files (`examples/site.rs`, shipped in 0.7), rendered by Luminess through `Cx::body_mut`. Themed error pages wait for an engine that implements `Render`.
 
-## v0.9.0 - Beta
-- [ ] Pre-1.0 polish pass: every accepted gap, deferred item, and missed target revisited.
-- [ ] Benchmarks on a quiet machine, with the per-step split (moved from 0.6).
-- [ ] Both fuzz targets 24 hours on the final code (moved from 0.7).
-- [ ] Adversarial review, findings fixed test-first.
-- [ ] `dev/READINESS-1.0.md` for James.
+## v0.9.0 - Beta (DONE, 2026-11-10)
+- [x] Pre-1.0 polish pass, every accepted gap and deferred item revisited:
+  - fixed: `Sites` and lower-case sites (D-059); a missing asset no longer answers chunked (the in-flight table replaced the `stream()` probe);
+  - documented: CSRF always strict (D-060), buffered request bodies only (O-8), `CachePolicy::Public` is public for signed-in visitors too;
+  - kept, with reasons in the plan: no after-response hook (D-041), no per-variant cache in web-net (the cacheability report), gzip only (D-038);
+  - waiting on other crates, asked for: serve-net's reply buffer (O-4) and explicit abort (O-7), a Brotli encoder in compress-lib.
+- [x] Both fuzz targets 24 hours on the final code (moved from 0.7).
+- [x] Adversarial review, findings fixed test-first (two independent reviews in 0.7, eleven defects fixed; a form-net cross-review in 0.7).
+- [x] `dev/READINESS-1.0.md` for James.
+- Moved to 0.9.x, with the reason: benchmarks on a quiet machine with the per-step split. The shared machine has not been quiet through any release; the numbers in `docs/PERFORMANCE.md` stay relative until it is.
+
+## v0.9.x - Until 1.0
+- [ ] A site in production on web-net for two weeks (James).
+- [ ] The gate crates on crates.io, and a test against them here (James: repositories).
+- [ ] Quiet-machine benchmarks.
+- [ ] `examples/site.rs` renders through Luminess's `Render` implementation (`luminess::web::Theme`, themed error pages) once Luminess accepts web-net 0.9 (asked: `>=0.8, <0.10`).
 
 ## v1.0.0 - Stable
 - [ ] James's decision, after the first site has run on it end to end.

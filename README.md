@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party runtime dependencies.
     </p>
     <blockquote>
-        <strong>Status: <code>0.8.0</code>, alpha.</strong> The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
+        <strong>Status: <code>0.9.0</code>, beta.</strong> 1.0 waits for a site in production (`dev/READINESS-1.0.md`). The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>.
     </blockquote>
 </div>
 
@@ -40,7 +40,7 @@
 
 ```toml
 [dependencies]
-web-net = "0.8"
+web-net = "0.9"
 serve-net = "0.7"
 ```
 
@@ -106,7 +106,7 @@ Security: every threat the plan names has an attack test that must fail, the pat
 
 `examples/site.rs` puts it together: sessions, sign-in with CSRF, an upload, static files, and pages rendered by Luminess.
 
-Coming next (see the roadmap): the beta polish pass (0.9).
+Coming next (see the roadmap): 0.9.x releases until a site has run on web-net in production; 1.0 after that.
 
 <hr>
 <br>

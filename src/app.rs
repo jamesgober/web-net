@@ -313,6 +313,9 @@ impl<G: Gate, E: Render> Builder<G, E> {
     /// [`web_net::csrf_sec`](crate::csrf_sec)), built from a persisted
     /// 32-byte key. Required as soon as one route takes an unsafe method and
     /// is not [exempt](crate::Route::csrf_exempt).
+    ///
+    /// web-net always applies the origin policy and a token, whatever the
+    /// `Csrf`'s `Mode`; its keys, lifetimes, and allowed origins apply as set.
     #[must_use]
     pub fn csrf(mut self, csrf: csrf_sec::Csrf) -> Self {
         self.csrf = Some(csrf);
@@ -1758,9 +1761,18 @@ impl<G: Gate, E: Render> App<G, E> {
             return None;
         };
         let base = self.shared.base.as_ref();
+        // A site with lower-case paths claims `/BLOG/x` too: it redirects it
+        // to `/blog/x` itself, instead of another site answering it.
+        let head = path.get(..base.len());
+        let starts = head.is_some_and(|h| {
+            if self.site.lowercase {
+                h.eq_ignore_ascii_case(base)
+            } else {
+                h == base
+            }
+        });
         let inside = base.is_empty()
-            || path == base
-            || path.strip_prefix(base).is_some_and(|r| r.starts_with('/'));
+            || (starts && matches!(path.as_bytes().get(base.len()), None | Some(b'/')));
         inside.then_some((rank, base.len()))
     }
 
