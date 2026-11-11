@@ -467,3 +467,19 @@ fn t15_budgets() {
         .unwrap();
     assert_eq!(send(&many, "GET / HTTP/1.1\r\nHost: a").status, 500);
 }
+
+/// A C1 control (U+0080 to U+009F, NEL among them) is a control: refused
+/// with 400 like a C0 control, never handed to a handler or a log line.
+#[test]
+fn t01b_c1_controls_in_a_path_are_refused() {
+    let app = App::builder()
+        .route(get("/*rest", |cx| cx.text(200, &cx.param("rest")?)))
+        .build()
+        .unwrap();
+    for p in ["/a%C2%85b", "/%c2%80", "/x/%C2%9F"] {
+        let r = send(&app, &format!("GET {p} HTTP/1.1\r\nHost: a"));
+        assert_eq!(r.status, 400, "{p}");
+    }
+    let r = send(&app, "GET /caf%C3%A9 HTTP/1.1\r\nHost: a");
+    assert_eq!((r.status, r.text()), (200, "café"));
+}

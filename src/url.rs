@@ -257,6 +257,14 @@ pub(crate) fn normalize(raw: &str, lowercase: bool) -> Result<Cow<'_, str>, UrlE
                 if core::str::from_utf8(decoded).is_err() {
                     return Err(UrlError::NotUtf8);
                 }
+                // C1 controls (U+0080 to U+009F) are 0xC2 0x80..=0x9F in
+                // UTF-8; in valid UTF-8 a 0xC2 is always a lead byte.
+                if decoded
+                    .windows(2)
+                    .any(|w| w[0] == 0xC2 && (0x80..=0x9F).contains(&w[1]))
+                {
+                    return Err(UrlError::Control);
+                }
                 segs.push((start, buf.len()));
                 trailing = false;
             }
@@ -349,6 +357,13 @@ mod tests {
         assert_eq!(n("/a%00"), Err(UrlError::Control));
         assert_eq!(n("/a%0d%0a"), Err(UrlError::Control));
         assert_eq!(n("/a%7f"), Err(UrlError::Control));
+        // C1 controls (U+0080 to U+009F, NEL among them) are controls too.
+        assert_eq!(n("/%c2%80"), Err(UrlError::Control));
+        assert_eq!(n("/a%C2%85b"), Err(UrlError::Control));
+        assert_eq!(n("/a/%c2%9f"), Err(UrlError::Control));
+        // Their neighbours are text.
+        assert_eq!(n("/%c2%a0").as_deref(), Ok("/%C2%A0"));
+        assert_eq!(n("/caf%c3%a9").as_deref(), Ok("/caf%C3%A9"));
         assert_eq!(n("/a%zz"), Err(UrlError::BadEscape));
         assert_eq!(n("/a%4"), Err(UrlError::BadEscape));
         assert_eq!(n("/a%ff"), Err(UrlError::NotUtf8));
@@ -405,9 +420,10 @@ mod tests {
             proptest::collection::vec(piece, 0..12).prop_map(|v| format!("/{}", v.concat()))
         }
 
-        /// A segment's bytes as decoded text: no `/`, `\\`, or control.
+        /// A segment's bytes as decoded text: no `/`, `\\`, or control
+        /// (C0, DEL, or C1).
         fn segment() -> impl Strategy<Value = String> {
-            "[^/\\\\\\x00-\\x1f\\x7f]{1,8}"
+            "[^/\\\\\\x00-\\x1f\\x7f-\\x{9f}]{1,8}"
                 .prop_filter("not a dot segment", |s| s != "." && s != "..")
         }
 

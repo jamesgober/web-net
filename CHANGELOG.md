@@ -56,12 +56,26 @@ way to do each thing (`dev/SIMPLICITY-0.10.md`). This release breaks the
 - `Events` and `Checkpoint` for `Arc<T>`, so an application can keep a
   handle to its sink or its lockdown switch.
 
+### Fixed
+
+- A path that decodes to a C1 control character (U+0080 to U+009F, such as
+  `%C2%85`, NEL) is refused with 400 `url.control`, as C0 controls and DEL
+  always were. Found by the path property test.
+
 ### Documentation
 
 - `docs/API.md` rewritten as a task-oriented reference with every public
   item; it and the README compile and run as doctests.
 - `dev/SIMPLICITY-0.10.md`: the audit, each finding, and what was kept with
   its reason.
+
+### Verification
+
+- Both fuzz targets an hour each on this code; the path property test at
+  50,000 cases.
+- Benchmarks against 0.9.0, six alternating rounds per side in one job: no
+  measurable change (medians 0.74 to 1.11 of 0.9.0 across the request
+  benchmarks, serve-net alone 0.99, on a loaded machine).
 
 ### Unchanged
 

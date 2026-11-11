@@ -306,7 +306,7 @@ assert_eq!(r.status, 421);
 
 Every path is decoded once and redirected to its one canonical spelling, so
 two spellings never reach two routes. An encoded slash, an encoded
-backslash, a control character, or bytes that are not UTF-8 are refused with
+backslash, a control character (C0, DEL, or C1), or bytes that are not UTF-8 are refused with
 400; `UrlError` names each (`code()` gives `url.encoded_slash` and so on).
 
 ## Gates: who is asking, and may they

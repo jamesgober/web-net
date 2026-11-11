@@ -89,7 +89,7 @@ Why authentication runs before routing: a ban, an expired session, or a forged t
 | development | `localhost`, `127.0.0.1`, `[::1]`, `*.localhost` are the site only on a builder marked `development()`; HTTPS is not required for them | production never trusts "localhost" in a `Host` field |
 | HTTPS | `https_only()` redirects plain HTTP to `https://` on the canonical host; it needs a declared host, so a redirect is never built from the request's `Host` | no host-header poisoning through redirects |
 | base path | `/blog`: removed before routing, added back by `Cx::url` and every redirect; `/blog` itself is redirected to `/blog/`; paths outside get 404 | the site works installed in a folder and moves without editing routes |
-| decoding | percent-escapes decoded once; the decoded bytes must be UTF-8; `%2F` (encoded slash), `%5C` and a raw `\`, and any control character are refused with 400 | double decoding and encoded separators are classic routing and traversal bypasses |
+| decoding | percent-escapes decoded once; the decoded bytes must be UTF-8; `%2F` (encoded slash), `%5C` and a raw `\`, and any control character (C0, DEL, and C1: U+0080 to U+009F) are refused with 400 | double decoding and encoded separators are classic routing and traversal bypasses |
 | canonical form | each decoded segment re-encoded one way: RFC 3986 `pchar` bytes (unreserved, sub-delims, `:`, `@`) written as they are, every other byte as upper-case `%XX` | each path has exactly one spelling, so route literals compare byte for byte |
 | dot segments | `.` and `..` removed after decoding (`%2e%2e` is `..`), never above the root | `..` can never escape a folder |
 | empty segments | `//` collapses | one URL per page |
@@ -487,6 +487,7 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-068 | 2026-11-11 | `docs/API.md` and the README compile as doctests | the reference cannot drift from the API |
 | D-069 | 2026-11-11 | `ErrorPage` carries the site's base path (`base`, `url(path)`) | an error page of a site in a folder links its stylesheet and home inside the folder; the engine had no other way to learn the base |
 | D-070 | 2026-11-11 | `Denial::unavailable(code)` (503) and `Denial::retry_after(seconds)`; `with_status` still accepts 4xx only | a gate whose stores are down fails closed; clients and load balancers must read that as retryable, not as "you may not". 503 is its own constructor so a gate still cannot turn a denial into a 500 or a success |
+| D-071 | 2026-11-11 | C1 controls (U+0080 to U+009F, `%C2%80` to `%C2%9F`) are controls: refused with 400 `url.control` | D-014 refuses every control character, but only C0 and DEL were checked; NEL (U+0085) is a line break to some log readers. Found by the path property test on CI |
 | D-059 | 2026-11-09 | `Sites` lets a site with lower-case paths claim upper-case spellings of its base | it redirects them itself, instead of another site answering |
 | D-060 | 2026-11-09 | The CSRF step always applies csrf-sec's origin policy and a token; csrf-sec's `Mode` setting does not loosen it | one strict rule for every route; a looser mode would need its own decision |
 | D-056 | 2026-11-09 | `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]` | web-net makes them and callers read them; a field added in 1.x must not break anyone |
