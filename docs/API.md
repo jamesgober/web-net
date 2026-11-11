@@ -374,8 +374,10 @@ assert_eq!(r.text(), "ann");
 | `Denial::forbidden(code)` | 403 |
 | `Denial::hidden(code)` | 404, hiding that the page exists |
 | `Denial::with_status(status, code)` | another 4xx (429, 451); anything else is answered as 403 |
+| `Denial::unavailable(code)` | 503: the gate cannot decide now (a store is down) and fails closed; clients retry |
+| `Denial::retry_after(seconds)`, `retry_seconds()` | a `Retry-After` field, sent only with 429 and 503 |
 | `Denial::with_cookie(value)`, `cookie()` | a `Set-Cookie` the refusal carries |
-| `Denial::kind()`, `code()`, `status()` | `DenialKind::{SignIn, Forbidden, Hidden, Status(u16)}`, the code, the status |
+| `Denial::kind()`, `code()`, `status()` | `DenialKind::{SignIn, Forbidden, Hidden, Status(u16), Unavailable}`, the code, the status |
 | `App::with_gate(gate)`, `App::gate()` | an app with your gate; the gate it holds |
 
 ## Forms, uploads, CSRF

@@ -1685,6 +1685,9 @@ impl<G: Gate, E: Render> App<G, E> {
         if status == 401 {
             reply.header("www-authenticate", self.shared.challenge.as_bytes());
         }
+        if let Some(seconds) = d.retry_seconds().filter(|_| matches!(status, 429 | 503)) {
+            reply.header("retry-after", seconds.to_string().as_bytes());
+        }
         if let Some(c) = d.cookie() {
             reply.header("set-cookie", c.as_bytes());
         }

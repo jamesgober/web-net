@@ -192,3 +192,36 @@ fn test_listen_unresolvable_address_is_an_error() {
         .unwrap();
     assert!(app.listen("256.0.0.1:80").is_err());
 }
+
+/// A gate whose store is down fails closed with a retryable 503.
+struct Down(Denial);
+impl Gate for Down {
+    type Identity = Member;
+    type Rule = ();
+    fn authenticate(&self, _: &Request<'_>) -> Result<Member, Denial> {
+        Err(self.0.clone())
+    }
+    fn authorize(&self, _: &Member, _: &(), _: &Request<'_>) -> Result<(), Denial> {
+        Ok(())
+    }
+}
+
+#[test]
+fn test_unavailable_gate_answers_503_with_retry_after() {
+    let app = App::with_gate(Down(Denial::unavailable("gate.unavailable").retry_after(5)))
+        .route(get("/", |cx| cx.text(200, "x")).public())
+        .build()
+        .unwrap();
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    assert_eq!(r.status, 503);
+    assert_eq!(r.header("retry-after"), Some(&b"5"[..]));
+    assert_eq!(r.header("cache-control"), Some(&b"no-store"[..]));
+
+    // Retry-After only goes with the statuses a client retries.
+    let app = App::with_gate(Down(Denial::forbidden("gate.banned").retry_after(5)))
+        .route(get("/", |cx| cx.text(200, "x")).public())
+        .build()
+        .unwrap();
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    assert_eq!((r.status, r.header("retry-after")), (403, None));
+}

@@ -143,6 +143,9 @@ pub enum DenialKind {
     Hidden,
     /// Another 4xx status (a 429 for a standing limit, for example).
     Status(u16),
+    /// 503 Service Unavailable: the gate cannot decide now (its stores are
+    /// down) and fails closed; the client may retry.
+    Unavailable,
 }
 
 /// A refusal from a gate: what the visitor sees, and a stable code for logs
@@ -152,6 +155,7 @@ pub struct Denial {
     kind: DenialKind,
     code: &'static str,
     cookie: Option<Box<str>>,
+    retry_after: Option<u32>,
 }
 
 impl Denial {
@@ -162,6 +166,7 @@ impl Denial {
             kind: DenialKind::SignIn,
             code,
             cookie: None,
+            retry_after: None,
         }
     }
 
@@ -172,6 +177,7 @@ impl Denial {
             kind: DenialKind::Forbidden,
             code,
             cookie: None,
+            retry_after: None,
         }
     }
 
@@ -182,6 +188,7 @@ impl Denial {
             kind: DenialKind::Hidden,
             code,
             cookie: None,
+            retry_after: None,
         }
     }
 
@@ -206,7 +213,42 @@ impl Denial {
             kind,
             code,
             cookie: None,
+            retry_after: None,
         }
+    }
+
+    /// 503 Service Unavailable: the gate cannot decide now (a store it
+    /// needs is down) and fails closed. Clients and load balancers read it
+    /// as "try again", not "you may not".
+    ///
+    /// ```
+    /// use web_net::Denial;
+    ///
+    /// let d = Denial::unavailable("gate.unavailable").retry_after(5);
+    /// assert_eq!((d.status(), d.retry_seconds()), (503, Some(5)));
+    /// ```
+    #[must_use]
+    pub const fn unavailable(code: &'static str) -> Self {
+        Self {
+            kind: DenialKind::Unavailable,
+            code,
+            cookie: None,
+            retry_after: None,
+        }
+    }
+
+    /// A `Retry-After: <seconds>` field on the refusal. Sent only when the
+    /// status is 429 or 503, the statuses a client retries.
+    #[must_use]
+    pub const fn retry_after(mut self, seconds: u32) -> Self {
+        self.retry_after = Some(seconds);
+        self
+    }
+
+    /// The `Retry-After` seconds, if any.
+    #[must_use]
+    pub const fn retry_seconds(&self) -> Option<u32> {
+        self.retry_after
     }
 
     /// A `Set-Cookie` value the refusal carries (a dead session's cookie
@@ -243,6 +285,7 @@ impl Denial {
             DenialKind::Forbidden => 403,
             DenialKind::Hidden => 404,
             DenialKind::Status(s) => s,
+            DenialKind::Unavailable => 503,
         }
     }
 }
@@ -253,6 +296,7 @@ impl fmt::Debug for Denial {
             .field("kind", &self.kind)
             .field("code", &self.code)
             .field("cookie", &self.cookie.as_ref().map(|_| "<set>"))
+            .field("retry_after", &self.retry_after)
             .finish()
     }
 }
@@ -278,5 +322,12 @@ mod tests {
         assert_eq!(Denial::with_status(200, "a").status(), 403);
         assert_eq!(Denial::with_status(500, "a").status(), 403);
         assert_eq!(Denial::forbidden("x.y").code(), "x.y");
+        assert_eq!(Denial::unavailable("a").status(), 503);
+        assert_eq!(Denial::unavailable("a").kind(), DenialKind::Unavailable);
+        assert_eq!(Denial::unavailable("a").retry_seconds(), None);
+        assert_eq!(
+            Denial::forbidden("a").retry_after(3).retry_seconds(),
+            Some(3)
+        );
     }
 }

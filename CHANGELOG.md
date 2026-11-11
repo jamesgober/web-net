@@ -49,6 +49,10 @@ way to do each thing (`dev/SIMPLICITY-0.10.md`). This release breaks the
   installed in a folder (`/blog`) links its stylesheet and home inside the
   folder. `ErrorPage::with_base` for an engine's tests. `ErrorPage::new` is
   unchanged.
+- `Denial::unavailable(code)`: a 503 for a gate that cannot decide now (its
+  stores are down) and fails closed, so clients and load balancers retry
+  instead of reading "forbidden". `Denial::retry_after(seconds)` adds
+  `Retry-After` to a 429 or 503. `DenialKind::Unavailable`.
 - `Events` and `Checkpoint` for `Arc<T>`, so an application can keep a
   handle to its sink or its lockdown switch.
 
