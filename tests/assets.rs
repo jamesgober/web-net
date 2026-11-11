@@ -46,13 +46,7 @@ fn app(dir: &Dir) -> App {
                 .precompressed(false),
         )
         .health("/healthz")
-        .route(
-            get("/", |cx| {
-                cx.text(200, "home");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "home")).public())
         .build()
         .unwrap()
 }
@@ -386,18 +380,11 @@ fn test_health_and_ready() {
 fn test_security_headers() {
     let app = App::builder()
         .host("example.com")
-        .route(
-            get("/", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "x")).public())
         .route(
             get("/framed", |cx| {
                 cx.set_header("x-frame-options", "SAMEORIGIN");
-                cx.text(200, "x");
-                Ok(())
+                cx.text(200, "x")
             })
             .public(),
         )
@@ -425,13 +412,7 @@ fn test_security_headers() {
 
     let bare = App::builder()
         .security_headers(SecurityHeaders::none())
-        .route(
-            get("/", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
     let r = send(&bare, "GET / HTTP/1.1\r\nHost: a");
@@ -446,13 +427,7 @@ fn test_no_hsts_for_development_hosts() {
     let app = App::builder()
         .host("example.com")
         .development()
-        .route(
-            get("/", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
     let r = TestRequest::new(b"GET / HTTP/1.1\r\nHost: localhost:8443\r\n\r\n")
@@ -466,13 +441,7 @@ fn test_build_checks_for_assets() {
     let e = App::builder()
         .assets(Assets::new("/static", "/definitely/not/here/web-net"))
         .assets(Assets::new("static", "."))
-        .route(
-            get("/static/x", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/static/x", |cx| cx.text(200, "x")).public())
         .health("health")
         .build()
         .unwrap_err();

@@ -65,22 +65,17 @@ fn app(log: &'static Log) -> App<Sessions> {
         .route(
             get("/token", |cx: &mut Cx<'_, Visitor>| {
                 let t = cx.csrf_token()?;
-                cx.text(200, &t);
-                Ok(())
+                cx.text(200, &t)
             })
             .public(),
         )
         .route(
             post("/email", |cx: &mut Cx<'_, Visitor>| {
                 match cx.form::<Email>() {
-                    Ok(f) => {
-                        cx.text(200, &f.email);
-                        Ok(())
-                    }
+                    Ok(f) => cx.text(200, &f.email),
                     // The action pattern: a form with errors comes back with 422.
                     Err(e) if e.status_hint() == 422 || e.status_hint() == 400 => {
-                        cx.status(422).html(422, "<p>check the form</p>");
-                        Ok(())
+                        cx.html(422, "<p>check the form</p>")
                     }
                     Err(e) => Err(e.into()),
                 }
@@ -90,8 +85,7 @@ fn app(log: &'static Log) -> App<Sessions> {
         .route(
             post("/api", |cx: &mut Cx<'_, Visitor>| {
                 let n = cx.body()?.len();
-                cx.text(200, &n.to_string());
-                Ok(())
+                cx.text(200, &n.to_string())
             })
             .public(),
         )
@@ -99,26 +93,21 @@ fn app(log: &'static Log) -> App<Sessions> {
             post("/lazy", |cx: &mut Cx<'_, Visitor>| {
                 // Never reads its body: under multipart, the reply must not leave.
                 cx.set_header("set-cookie", "changed=1");
-                cx.text(200, "changed");
-                Ok(())
+                cx.text(200, "changed")
             })
             .public(),
         )
         .route(
             post("/raw", |cx: &mut Cx<'_, Visitor>| {
                 let b = cx.body()?;
-                cx.text(200, &b.len().to_string());
-                Ok(())
+                cx.text(200, &b.len().to_string())
             })
             .public(),
         )
         .route(
-            post("/hook", |cx: &mut Cx<'_, Visitor>| {
-                cx.text(200, "hook");
-                Ok(())
-            })
-            .public()
-            .csrf_exempt("signed by the sender"),
+            post("/hook", |cx: &mut Cx<'_, Visitor>| cx.text(200, "hook"))
+                .public()
+                .csrf_exempt("signed by the sender"),
         )
         .route(
             get("/away", |cx: &mut Cx<'_, Visitor>| {
@@ -131,8 +120,7 @@ fn app(log: &'static Log) -> App<Sessions> {
             Route::at("/doc")
                 .put(|cx: &mut Cx<'_, Visitor>| {
                     cx.precondition(Some("v2"), None)?;
-                    cx.text(200, "saved");
-                    Ok(())
+                    cx.text(200, "saved")
                 })
                 .public(),
         )
@@ -174,28 +162,16 @@ const FORM: &str = "application/x-www-form-urlencoded";
 #[test]
 fn test_build_requires_csrf_or_an_exemption() {
     let e = App::builder()
+        .route(post("/a", |cx| cx.text(200, "a")).public())
         .route(
-            post("/a", |cx| {
-                cx.text(200, "a");
-                Ok(())
-            })
-            .public(),
+            post("/b", |cx| cx.text(200, "b"))
+                .public()
+                .csrf_exempt("  "),
         )
         .route(
-            post("/b", |cx| {
-                cx.text(200, "b");
-                Ok(())
-            })
-            .public()
-            .csrf_exempt("  "),
-        )
-        .route(
-            post("/c", |cx| {
-                cx.text(200, "c");
-                Ok(())
-            })
-            .public()
-            .csrf_exempt("a webhook"),
+            post("/c", |cx| cx.text(200, "c"))
+                .public()
+                .csrf_exempt("a webhook"),
         )
         .build()
         .unwrap_err();
@@ -413,8 +389,7 @@ fn test_uploads_check_the_token_before_storing() {
         .route(
             get("/token", |cx: &mut Cx<'_, Visitor>| {
                 let t = cx.csrf_token()?;
-                cx.text(200, &t);
-                Ok(())
+                cx.text(200, &t)
             })
             .public(),
         )
@@ -422,8 +397,7 @@ fn test_uploads_check_the_token_before_storing() {
             post("/upload", move |cx: &mut Cx<'_, Visitor>| {
                 let up = cx.upload(store)?;
                 let n = up.files("doc").count();
-                cx.text(200, &n.to_string());
-                Ok(())
+                cx.text(200, &n.to_string())
             })
             .public(),
         )

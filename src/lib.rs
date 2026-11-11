@@ -2,6 +2,24 @@
 //!
 //! The web layer on serve-net: what a site is written in.
 //!
+//! A site in five lines:
+//!
+//! ```no_run
+//! use web_net::{App, get};
+//!
+//! App::builder()
+//!     .route(get("/", |cx| cx.html(200, "<h1>Hello</h1>")))
+//!     .route(get("/posts/:slug", |cx| cx.text(200, &cx.param("slug")?)))
+//!     .build()?
+//!     .listen("127.0.0.1:8080")?
+//!     .wait();
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! A handler gets a [`Cx`] and ends with one reply: [`Cx::html`],
+//! [`Cx::text`], [`Cx::bytes`], [`Cx::redirect`], or [`Cx::render`] for a
+//! template. `?` turns any error into the right error page.
+//!
 //! A request runs one fixed path, and each step either answers or hands on:
 //!
 //! 1. **site**: the `Host` picks the site (unknown hosts get 421, aliases a
@@ -13,15 +31,17 @@
 //!    two spellings never reach different routes. An encoded slash, an
 //!    encoded backslash, a control character, or bytes that are not UTF-8
 //!    are refused with 400.
-//! 3. **authenticate**: the [`Gate`] says who is asking (or the caller did,
-//!    with [`App::respond_identified`]).
+//! 3. **authenticate**: the [`Gate`] says who is asking (or a front that
+//!    authenticated already passes the identity to [`App::respond`]).
 //! 4. **route**: a trie compiled at build time matches the path (404 when
 //!    nothing does).
 //! 5. **method**: `HEAD` follows `GET`, `OPTIONS` is answered for every
 //!    route, anything else the route does not take is a 405 with `Allow`.
-//! 6. **authorize**: the route's rule, checked by the gate. Every route
-//!    declares its access, [`public`](Route::public) or
-//!    [`allow`](Route::allow); a route without one stops the build.
+//! 6. **authorize**: the route's rule, checked by the gate. With a gate that
+//!    has rules, every route declares its access,
+//!    [`public`](Route::public) or [`allow`](Route::allow), and a route
+//!    without one stops the build. With [`Open`] (no sign-in) every route is
+//!    public.
 //! 7. **hooks and handler**: registered [`Hook`]s for this route, then the
 //!    handler, which receives a [`Cx`]: proof the request passed its gate.
 //! 8. **render**: a [`Render`] engine writes the page from a typed [`View`],
@@ -31,18 +51,14 @@
 //!    [`Events`].
 //!
 //! ```
-//! use web_net::{App, Fields, Value, get};
+//! use web_net::{App, get};
 //!
 //! let app = App::builder()
 //!     .host("example.com")
 //!     .alias("www.example.com")
 //!     .base("/blog")
-//!     .route(get("/", |cx| { cx.html(200, "<h1>Blog</h1>"); Ok(()) }).public())
-//!     .route(get("/posts/:slug", |cx| {
-//!         let slug = cx.param("slug").unwrap_or_default();
-//!         cx.text(200, &slug);
-//!         Ok(())
-//!     }).public())
+//!     .route(get("/", |cx| cx.html(200, "<h1>Blog</h1>")))
+//!     .route(get("/posts/:slug", |cx| cx.text(200, &cx.param("slug")?)))
 //!     .build()?;
 //!
 //! use serve_net::testing::respond;
@@ -60,8 +76,12 @@
 //! # Ok::<(), web_net::BuildError>(())
 //! ```
 //!
-//! On a server: `serve_net::Server::builder()...serve(app)`, or
-//! `serve_net::http("127.0.0.1:8080", ...)` for a quick start with a closure.
+//! [`App::listen`] serves one app on one address with serve-net's defaults.
+//! For TLS, several listeners, or other limits, an [`App`] is a
+//! `serve_net::HttpService`: `serve_net::Server::builder()...serve(app)`.
+//!
+//! The reference with every public item is `docs/API.md` in the
+//! repository.
 
 #![doc(html_root_url = "https://docs.rs/web-net")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -114,6 +134,16 @@ pub use form_net;
 
 /// Crate version string, populated by Cargo at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The README and `docs/API.md` are compiled and run as doctests, so the
+/// reference cannot drift from the API.
+#[cfg(all(doctest, feature = "uploads"))]
+mod doc_tests {
+    #[doc = include_str!("../README.md")]
+    struct Readme;
+    #[doc = include_str!("../docs/API.md")]
+    struct ApiReference;
+}
 
 #[cfg(test)]
 mod tests {

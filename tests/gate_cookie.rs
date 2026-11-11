@@ -1,5 +1,5 @@
 //! A cookie the gate sets during authentication leaves on every exit of
-//! `respond`, once; `respond_identified` leaves it to its caller.
+//! `respond`, once; `respond` with an identity leaves it to its caller.
 
 use serve_net::testing::{TestReply, respond};
 use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
@@ -37,26 +37,14 @@ impl Gate for G {
 fn app() -> App<G> {
     App::with_gate(G)
         .sign_in("/login")
-        .route(
-            get("/", |cx: &mut Cx<'_, Dead>| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx: &mut Cx<'_, Dead>| cx.text(200, "x")).public())
         .route(
             get("/fail", |_: &mut Cx<'_, Dead>| {
                 Err(web_net::Error::internal("x"))
             })
             .public(),
         )
-        .route(
-            get("/private", |cx: &mut Cx<'_, Dead>| {
-                cx.text(200, "p");
-                Ok(())
-            })
-            .allow(()),
-        )
+        .route(get("/private", |cx: &mut Cx<'_, Dead>| cx.text(200, "p")).allow(()))
         .build()
         .unwrap()
 }
@@ -86,11 +74,11 @@ fn test_gate_cookie_on_every_exit() {
 }
 
 #[test]
-fn test_respond_identified_leaves_the_cookie_to_its_caller() {
+fn test_respond_with_identity_leaves_the_cookie_to_its_caller() {
     struct Core(App<G>);
     impl HttpService for Core {
         fn call(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
-            self.0.respond_identified(req, env, &Dead, reply)
+            self.0.respond(req, env, Some(&Dead), reply).outcome
         }
     }
     let r = respond(&Core(app()), b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");

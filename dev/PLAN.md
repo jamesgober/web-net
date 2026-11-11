@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) &rarr; [`DIRECTIVES.md`](./DIRECTIVES.md) &rarr; **this file** &rarr; [`ROADMAP.md`](./ROADMAP.md).
 >
-> **Status:** `0.9.0`: beta (the pre-1.0 polish pass; `dev/READINESS-1.0.md`). Alpha at `0.8.0`. Hardening at `0.7.0`. Performance at `0.6.0`, negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
+> **Status:** `0.10.0`: beta, simplified (`dev/SIMPLICITY-0.10.md`). Beta polish at `0.9.0` (`dev/READINESS-1.0.md`). Alpha at `0.8.0`. Hardening at `0.7.0`. Performance at `0.6.0`, negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
 
 ---
 
@@ -48,7 +48,7 @@ web-net is generic. Any application with its own authentication, template engine
 | owns | the connection, framing (`content-length`, `connection`), keep-alive, the trusted client address and scheme | everything between "request complete" and "reply ready" |
 | never sees | which route matched | a socket, a listener, or which front end the request came through |
 
-An `App` is a `serve_net::HttpService`, so it runs on serve-net as it is. A wrapper with its own service (one that authenticates before the web layer, for example) calls `App::respond` or `App::respond_identified` from its `call`, and `App::classify` from its `head` for dispatch decisions before admission. In tests the whole pipeline runs in memory through `serve_net::testing`, no sockets.
+`App::listen(addr)` serves an app with serve-net's defaults. An `App` is also a `serve_net::HttpService`, so it runs on any serve-net server as it is. A wrapper with its own service (one that authenticates before the web layer, for example) calls `App::respond(req, env, who, reply)` from its `call`, with `who` the identity it established or `None`, and `App::classify` from its `head` for dispatch decisions before admission. In tests the whole pipeline runs in memory through `serve_net::testing`, no sockets.
 
 ---
 
@@ -61,7 +61,7 @@ One fixed path. Each step answers or hands on; nothing runs that the request doe
 | 1 | site | 421 unknown host; 301/308 to the canonical host or to HTTPS | host table from the builder; the base path is removed here |
 | 2 | url | 400 malformed; 301/308 to the canonical spelling | section 4 |
 | 2a | early | 404 for a missing file; 405 for a method other than `GET`/`HEAD` | health paths and static files, before the gate (section 12) |
-| 3 | authenticate | the gate's denial (403 for a ban) | skipped by `respond_identified` |
+| 3 | authenticate | the gate's denial (403 for a ban) | skipped when `respond` is given an identity |
 | 4 | route | 404 | section 5 |
 | 5 | method | 405 + `Allow`; 501 for an unknown method | `HEAD` follows `GET`; `OPTIONS` answered automatically |
 | 6 | authorize | 303 to sign-in, 401 + challenge, 403, 404 (hidden), other 4xx | not called for public routes |
@@ -73,7 +73,7 @@ One fixed path. Each step answers or hands on; nothing runs that the request doe
 | 11 | hooks `Finish` | the hook's error | add headers |
 | 12 | finish | 500 for an invalid field | the reply is copied to serve-net; `x-content-type-options: nosniff` and the security headers, except fields the handler set |
 
-The cache fast path for guests sits in front of web-net: `App::serve` reports whether a reply may be kept (section 12.4). The handler's own conditional fast path is `Cx::not_modified` (0.3).
+The cache fast path for guests sits in front of web-net: `App::respond` reports whether a reply may be kept (section 12.4). The handler's own conditional fast path is `Cx::not_modified` (0.3).
 
 Why authentication runs before routing: a ban, an expired session, or a forged token is caught before any route code or route lookup, and the router never needs to know about credentials. The cost is one gate call for requests that end in 404; a gate keeps that cheap (an in-memory session lookup).
 
@@ -130,11 +130,11 @@ pub trait Gate: Send + Sync + 'static {
 
 - One trait with two checkpoints, so an application has one type parameter (`App<G>`). An implementation joins its authentication and authorization crates; web-net names neither.
 - `Open` is the default gate: every visitor is a `Guest`, and its rule type (`NoRule`) has no values, so only public routes can be declared.
-- Every route declares `.public()` or `.allow(rule)`; groups give a default. A route with neither stops the build (D-002 kept).
+- With a gate that has rules, every route declares `.public()` or `.allow(rule)`; groups give a default. A route with neither stops the build (D-002 kept). With a gate whose rule type is `NoRule`, every route is public and declares nothing (D-061).
 - A handler receives a `Cx`, which only web-net can make, and only after the access check passed. Skipping the gate does not compile.
-- `Denial::{sign_in, forbidden, hidden, status}(code)`. `sign_in` on a `GET` or `HEAD` with a sign-in page configured is a 303 to it with `next` (the site-relative path and query, percent-encoded); otherwise 401 with the configured `WWW-Authenticate` challenge (default `Session`). `status` accepts 4xx only; anything else becomes 403, so a gate cannot turn a denial into a success.
+- `Denial::{sign_in, forbidden, hidden}(code)` and `Denial::with_status(status, code)`. `sign_in` on a `GET` or `HEAD` with a sign-in page configured is a 303 to it with `next` (the site-relative path and query, percent-encoded); otherwise 401 with the configured `WWW-Authenticate` value (`Builder::www_authenticate`, default `Session`). `with_status` accepts 4xx only; anything else becomes 403, so a gate cannot turn a denial into a success.
 - `Request::cookie(name)` reads through cookie-net and refuses ambiguity: a name twice, or two `Cookie` fields, is `Err(Ambiguous)`, never a pick.
-- `respond_identified` is for a caller that authenticated already; web-net trusts the identity it is given and still authorizes every route that is not public.
+- `App::respond` with `Some(identity)` is for a caller that authenticated already; web-net trusts the identity it is given and still authorizes every route that is not public.
 - Fail closed: a gate backed by remote state denies when it cannot decide.
 
 ---
@@ -142,10 +142,11 @@ pub trait Gate: Send + Sync + 'static {
 ## 7. Handlers and the context
 
 - A handler is `Fn(&mut Cx<'_, I>) -> web_net::Result` (or any `Handler<I>`). Synchronous: serve-net's workers run it; a route declares `.work(WorkClass::Io | Cpu)` so a dispatcher in front can move slow work off the connection's worker (`App::classify`).
-- `Cx` reads: method, canonical path, fields, identity, reference, parameters (`param`, `param_as` with 404 on a value that does not parse), query, body.
+- `Cx` reads: method, canonical path, fields, identity, reference, parameters (`param` with 500 for a name the pattern lacks, `param_as` with 404 on a value that does not parse), query, body.
+- `Cx` replies: `html`, `text`, `bytes`, `redirect`, and `render` each write a whole reply and return `Result`, so a handler ends with one (D-062).
 - `Cx` writes into a reply web-net holds (status, fields, body), copied to serve-net only when the handler and its hooks succeed. An error or a panic discards it whole: a cookie or header set before the failure never leaves.
 - Fields are checked as they are set: a name that is not a token, a value with a control character, or a framing field (`content-length`, `transfer-encoding`, `connection`, `keep-alive`, `upgrade`) turns the reply into a 500.
-- Redirects from handlers (`see_other`, `redirect`) take site-relative paths only: one leading `/`, never `//` or `/\`, visible ASCII. The base path is added. Redirects to other hosts come later, through an allowlist (0.4).
+- Redirects from handlers (`redirect(status, path)`) take site-relative paths only: one leading `/`, never `//` or `/\`, visible ASCII. The base path is added. Redirects to other hosts come later, through an allowlist (0.4).
 - The reply buffers are reused per thread between requests (taken for one request and put back, so nothing about a request stays there). `wipe_buffers()` zeroes them after every request.
 
 ---
@@ -184,7 +185,7 @@ pub trait View {
 ```
 
 - Two kinds of engine, one trait (D-058). A **typed** engine compiles its templates at boot against the application's own types (`type View<'a> = Page<'a>`) and reads them directly: a misspelled field is a boot error, not an empty string. A **dynamic** engine reads any value through web-net's `View` (`type View<'a> = dyn View + 'a`): the shape for adapters to third-party engines. The view type is generic over a lifetime, so views may borrow what the handler has.
-- `App`, `Builder`, `Cx`, `Route`, `Group`, and `Sites` are generic over the engine, `E = NoRender` by default. `App::with(gate, engine)` sets it; `Builder::render(engine)` too, before any route or hook (they are typed by the engine; one added before is a build error). Static dispatch: no engine call goes through a vtable.
+- `App`, `Builder`, `Cx`, `Route`, `Group`, and `Sites` are generic over the engine, `E = NoRender` by default. `Builder::render(engine)` sets it, before any route or hook (they are typed by the engine; one added before is a build error). Static dispatch: no engine call goes through a vtable.
 - Handlers: `cx.render(&view)` with the engine's view type; `cx.render_view(&dyn View)` for a dynamic engine (so a `Fields` or any view coerces).
 - No JSON between data and engine (D-007). Building a text document from typed data and parsing it back costs tens of microseconds per page [est.] and loses every type. An engine resolves the names a template uses to `Key`s once (through the view's `Shape`, cached per `ShapeId`) and reads values by key while rendering.
 - `Value`: absent, bool, int, float, text, trusted HTML (`SafeHtml::trusted`, greppable), a computed `Display`, a nested view, a list. `call` passes its result to a closure, so a method can return a value computed for the call.
@@ -224,10 +225,10 @@ pub trait View {
 | conditional fast path | 0.3 (done) | `Cx::not_modified(tag)` sets `ETag` and answers 304 when `If-None-Match` matches (weak comparison, `GET`/`HEAD`) |
 | forms and uploads | 0.4 (done) | section 12.3 |
 | CSRF | 0.4 (done) | section 12.3 |
-| actions | 0.4 (done) | the accepted form answers 303 (`see_other`), the refused one renders again with 422 from the `FormError` the handler got |
+| actions | 0.4 (done) | the accepted form answers 303 (`redirect(303, ..)`), the refused one renders again with 422 from the `FormError` the handler got |
 | external redirects | 0.4 (done) | `Builder::redirect_hosts` and `Cx::redirect_external`: `https://` or `http://`, a listed host, no user information, visible ASCII |
 | preconditions | 0.4 (done) | `Cx::precondition(tag, modified)`: `If-Match` (strong) and `If-Unmodified-Since` answer 412 before an unsafe request changes anything |
-| negotiation | 0.5 (done) | error replies in JSON when `Accept` prefers `application/json` to `text/html` (same facts as the page); `Cx::language(offers)` and `Cx::media(offers)` |
+| negotiation | 0.5 (done) | error replies in JSON when `Accept` prefers `application/json` to `text/html` (same facts as the page); `Cx::accept_language(offers)` and `Cx::accept(offers)` |
 | CORS | 0.5 (done) | section 12.5 |
 | compression | 0.5 (done) | `Builder::compress(Compression)`: gzip through compress-lib for compressible types over a minimum size (1 KiB), only when the client accepts gzip and only when it is smaller; `Vary: accept-encoding` on every compressible reply once enabled. Off by default (a proxy usually compresses). Brotli for dynamic replies waits for an encoder in compress-lib; static files have precompressed `.br` |
 | caching | 0.5 (done) | section 12.4 |
@@ -302,7 +303,7 @@ Cost [est., csrf-sec's own measurements]: about 110 ns to verify a token and abo
 
 A reply that sets a cookie (the handler's, or the gate's through `Identity::set_cookie`) gets `private, no-store` under every policy, `Unset` included, and replaces a `Cache-Control` the handler set when that one says `public`: a shared cache must never hand one visitor's cookie (a pre-session id is the CSRF binding) to the next. The gate's cookie goes before the handler's fields, and is dropped when the handler sets a cookie of the same name (a new session after sign-in), so it never cancels it. With `respond_identified` the caller writes its own cookies after web-net, so it must not keep a reply it adds a cookie to.
 
-`App::serve(req, env, who, reply) -> Served { outcome, route, cache }` tells a cache in front of web-net whether it may keep the reply for guests: `Cacheable::Guests { max_age }` only when the policy is `Guests` or `Public`, web-net set the `Cache-Control` itself (the handler did not), the route has no CORS policy, the request was a guest's `GET` or `HEAD`, the status is 200, no cookie is set, and the reply varies on nothing but `Accept-Encoding`. Everything else is `Cacheable::No`. The cache keys and invalidates on its own terms; web-net only says what is safe to keep.
+`App::respond(req, env, who, reply) -> Served { outcome, route, cache }` tells a cache in front of web-net whether it may keep the reply for guests: `Cacheable::Guests { max_age }` only when the policy is `Guests` or `Public`, web-net set the `Cache-Control` itself (the handler did not), the route has no CORS policy, the request was a guest's `GET` or `HEAD`, the status is 200, no cookie is set, and the reply varies on nothing but `Accept-Encoding`. Everything else is `Cacheable::No`. The cache keys and invalidates on its own terms; web-net only says what is safe to keep.
 
 ### 12.5 CORS
 
@@ -476,6 +477,15 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-042 | 2026-11-08 | The warm request path allocates nothing, checked by a counting-allocator test against bare serve-net | a regression shows up as a failing test, not as a slow week |
 | D-043 | 2026-11-08 | `Accept` is parsed only when it names JSON | most requests never ask for JSON; the error-reply choice should cost them nothing |
 | D-044 | 2026-11-08 | `OPTIONS *` meets the host check like any request | a host the site does not serve learns nothing from it |
+| D-061 | 2026-11-11 | A gate whose `Rule` is `NoRule` (the `Open` gate) needs no `.public()`: undeclared routes are public | with no rule values, public is the only access a route can have; writing it on every route of a site with no sign-in was noise. Gates with rules keep D-002 |
+| D-062 | 2026-11-11 | `Cx::html`, `text`, and the new `bytes(status, type, body)` return `Result`; `body_bytes` is removed | a handler that writes one reply is one expression, without `; Ok(())` |
+| D-063 | 2026-11-11 | `Cx::param` returns `Result` (500 `route.no_param` for a name the pattern lacks) | the matched pattern always has its parameters; `Option` made handlers write `unwrap_or_default` |
+| D-064 | 2026-11-11 | One way per job: `see_other` and `App::with(gate, engine)` removed; `App::respond(req, env, who, reply) -> Served` replaces `respond`, `respond_identified`, and `serve`; `Sites::serve` is `Sites::respond` | the simplicity audit; `redirect(303, ..)`, `with_gate(..).render(..)`, and one answer method cover each |
+| D-065 | 2026-11-11 | Names say what they touch: `Cx::accept` and `accept_language` (were `media`, `language`), `reply_buffer` (was `body_mut`), `Builder::www_authenticate` (was `challenge`), `Denial::with_status` and `status()` (were `status` and `status_code()`), `Group::at` (was `new`) | a newcomer reads them without the docs; `status` meant a constructor on `Denial` and a getter on `Error` |
+| D-066 | 2026-11-11 | `App::listen(addr)` and `Sites::listen(addr)`: one TCP listener per resolved address, serve-net's defaults | serving a site needed serve-net's builder, a listener spec, and a second dependency |
+| D-067 | 2026-11-11 | `Events` and `Checkpoint` are implemented for `Arc<T>` | an application keeps a handle to read what its sink counted, or to flip a lockdown; the orphan rule kept applications from writing it |
+| D-068 | 2026-11-11 | `docs/API.md` and the README compile as doctests | the reference cannot drift from the API |
+| D-069 | 2026-11-11 | `ErrorPage` carries the site's base path (`base`, `url(path)`) | an error page of a site in a folder links its stylesheet and home inside the folder; the engine had no other way to learn the base |
 | D-059 | 2026-11-09 | `Sites` lets a site with lower-case paths claim upper-case spellings of its base | it redirects them itself, instead of another site answering |
 | D-060 | 2026-11-09 | The CSRF step always applies csrf-sec's origin policy and a token; csrf-sec's `Mode` setting does not loosen it | one strict rule for every route; a looser mode would need its own decision |
 | D-056 | 2026-11-09 | `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]` | web-net makes them and callers read them; a field added in 1.x must not break anyone |

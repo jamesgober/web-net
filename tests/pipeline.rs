@@ -28,44 +28,32 @@ fn loc(r: &TestReply) -> &str {
 
 fn hello() -> App {
     App::builder()
-        .route(
-            get("/", |cx| {
-                cx.text(200, "home");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "home")).public())
         .route(
             Route::at("/form")
-                .get(|cx| {
-                    cx.text(200, "form");
-                    Ok(())
-                })
-                .post(|cx| cx.see_other("/form/done"))
+                .get(|cx| cx.text(200, "form"))
+                .post(|cx| cx.redirect(303, "/form/done"))
                 .public()
                 .csrf_exempt("pipeline tests have no sessions; CSRF is tested in tests/actions.rs"),
         )
         .route(
             get("/users/:id", |cx| {
                 let id: u32 = cx.param_as("id")?;
-                cx.text(200, &format!("user {id}"));
-                Ok(())
+                cx.text(200, &format!("user {id}"))
             })
             .public(),
         )
         .route(
             get("/files/*rest", |cx| {
-                let rest = cx.param("rest").unwrap_or_default().into_owned();
-                cx.text(200, &rest);
-                Ok(())
+                let rest = cx.param("rest")?.into_owned();
+                cx.text(200, &rest)
             })
             .public(),
         )
         .route(
             get("/q", |cx| {
                 let v = cx.query("v")?.unwrap_or_default().into_owned();
-                cx.text(200, &v);
-                Ok(())
+                cx.text(200, &v)
             })
             .public(),
         )
@@ -164,20 +152,8 @@ fn test_trailing_slash_policies() {
     let mk = |p| {
         App::builder()
             .trailing_slash(p)
-            .route(
-                get("/a", |cx| {
-                    cx.text(200, "a");
-                    Ok(())
-                })
-                .public(),
-            )
-            .route(
-                get("/s.css", |cx| {
-                    cx.text(200, "css");
-                    Ok(())
-                })
-                .public(),
-            )
+            .route(get("/a", |cx| cx.text(200, "a")).public())
+            .route(get("/s.css", |cx| cx.text(200, "css")).public())
             .build()
             .unwrap()
     };
@@ -199,13 +175,7 @@ fn test_trailing_slash_policies() {
 fn test_lowercase_paths() {
     let app = App::builder()
         .lowercase_paths()
-        .route(
-            get("/about", |cx| {
-                cx.text(200, "about");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/about", |cx| cx.text(200, "about")).public())
         .build()
         .unwrap();
     let r = get_req(&app, "/About");
@@ -219,14 +189,8 @@ fn site() -> App {
         .host("example.com")
         .alias("www.example.com")
         .base("/blog")
-        .route(
-            get("/", |cx| {
-                cx.text(200, &cx.url("/"));
-                Ok(())
-            })
-            .public(),
-        )
-        .route(get("/post", |cx| cx.see_other("/")).public())
+        .route(get("/", |cx| cx.text(200, &cx.url("/"))).public())
+        .route(get("/post", |cx| cx.redirect(303, "/")).public())
         .build()
         .unwrap()
 }
@@ -267,13 +231,7 @@ fn test_development_hosts() {
         .host("example.com")
         .development()
         .https_only()
-        .route(
-            get("/", |cx| {
-                cx.text(200, "ok");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "ok")).public())
         .build()
         .unwrap();
     for h in ["localhost:8080", "127.0.0.1", "[::1]:3000", "app.localhost"] {
@@ -289,13 +247,7 @@ fn test_https_only() {
     let app = App::builder()
         .host("example.com")
         .https_only()
-        .route(
-            get("/", |cx| {
-                cx.text(200, "ok");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "ok")).public())
         .build()
         .unwrap();
     let r = host(&app, "example.com", "/?a=b");
@@ -339,7 +291,7 @@ impl Gate for Demo {
             Ok(Some("admin")) => Ok(User { name: "admin" }),
             Ok(Some("ann")) => Ok(User { name: "ann" }),
             Ok(_) => Ok(User { name: "" }),
-            Err(_) => Err(Denial::status(400, "demo.cookie_twice")),
+            Err(_) => Err(Denial::with_status(400, "demo.cookie_twice")),
         }
     }
 
@@ -373,45 +325,28 @@ fn gated(log: &'static Log) -> App<Demo> {
     .route(
         get("/", |cx: &mut Cx<'_, User>| {
             let who = cx.identity().name;
-            cx.text(200, if who.is_empty() { "guest" } else { who });
-            Ok(())
+            cx.text(200, if who.is_empty() { "guest" } else { who })
         })
         .public(),
     )
     .route(
         get("/account", |cx: &mut Cx<'_, User>| {
-            cx.text(200, cx.identity().name);
-            Ok(())
+            cx.text(200, cx.identity().name)
         })
         .allow(Rule::SignedIn),
     )
     .route(
-        post("/account", |cx| cx.see_other("/account"))
+        post("/account", |cx| cx.redirect(303, "/account"))
             .allow(Rule::SignedIn)
             .csrf_exempt("gate tests; CSRF is tested in tests/actions.rs"),
     )
     .group(
-        Group::new("/admin")
+        Group::at("/admin")
             .allow(Rule::Admin)
-            .route(get("/", |cx| {
-                cx.text(200, "panel");
-                Ok(())
-            }))
-            .route(
-                get("/open", |cx| {
-                    cx.text(200, "open");
-                    Ok(())
-                })
-                .public(),
-            ),
+            .route(get("/", |cx| cx.text(200, "panel")))
+            .route(get("/open", |cx| cx.text(200, "open")).public()),
     )
-    .route(
-        get("/secret", |cx| {
-            cx.text(200, "x");
-            Ok(())
-        })
-        .allow(Rule::Hidden),
-    )
+    .route(get("/secret", |cx| cx.text(200, "x")).allow(Rule::Hidden))
     .build()
     .unwrap()
 }
@@ -475,7 +410,7 @@ fn test_sign_in_redirect_and_challenge() {
 }
 
 #[test]
-fn test_respond_identified_skips_authentication() {
+fn test_respond_with_identity_skips_authentication() {
     struct Core(App<Demo>);
     impl serve_net::HttpService for Core {
         fn call(
@@ -485,7 +420,8 @@ fn test_respond_identified_skips_authentication() {
             reply: &mut serve_net::HttpReply,
         ) -> serve_net::Outcome {
             self.0
-                .respond_identified(request, env, &User { name: "admin" }, reply)
+                .respond(request, env, Some(&User { name: "admin" }), reply)
+                .outcome
         }
     }
     let log: &'static Log = Box::leak(Box::default());
@@ -500,45 +436,19 @@ fn test_respond_identified_skips_authentication() {
 
 #[test]
 fn test_build_refuses_undeclared_access() {
-    let e = App::builder()
-        .route(get("/", |cx| {
-            cx.text(200, "x");
-            Ok(())
-        }))
-        .route(
-            get("/b", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
-        .route(
-            get("/b", |cx| {
-                cx.text(200, "y");
-                Ok(())
-            })
-            .public(),
-        )
-        .route(
-            get("bad", |cx| {
-                cx.text(200, "y");
-                Ok(())
-            })
-            .public(),
-        )
-        .route(Route::at("/none").public())
-        .route(
-            get("/t", |cx| {
-                cx.text(200, "y");
-                Ok(())
-            })
-            .public()
-            .template("page"),
-        )
-        .base("blog")
-        .https_only()
-        .build()
-        .unwrap_err();
+    let e = App::with_gate(Demo {
+        authenticated: AtomicU32::new(0),
+    })
+    .route(get("/", |cx| cx.text(200, "x")))
+    .route(get("/b", |cx| cx.text(200, "x")).public())
+    .route(get("/b", |cx| cx.text(200, "y")).public())
+    .route(get("bad", |cx| cx.text(200, "y")).public())
+    .route(Route::at("/none").public())
+    .route(get("/t", |cx| cx.text(200, "y")).public().template("page"))
+    .base("blog")
+    .https_only()
+    .build()
+    .unwrap_err();
     let subjects: Vec<&str> = e.problems().iter().map(|p| p.subject.as_str()).collect();
     assert_eq!(e.problems().len(), 7, "{e}");
     for s in ["/", "GET /b", "bad", "/none", "/t", "base", "https_only"] {
@@ -617,21 +527,8 @@ fn test_hooks_run_for_their_routes_only() {
             cx.set_header("x-home", "1");
             Ok(())
         })
-        .route(
-            get("/", |cx| {
-                cx.text(200, "home");
-                Ok(())
-            })
-            .public()
-            .name("home"),
-        )
-        .route(
-            get("/blog/:slug", |cx| {
-                cx.text(200, "post");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "home")).public().name("home"))
+        .route(get("/blog/:slug", |cx| cx.text(200, "post")).public())
         .build()
         .unwrap();
     assert_eq!(get_req(&app, "/").header("x-home"), Some(&b"1"[..]));
@@ -751,13 +648,7 @@ fn test_checkpoint_stops_render() {
             .public()
             .template("page"),
         )
-        .route(
-            get("/plain", |cx| {
-                cx.text(200, "ok");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/plain", |cx| cx.text(200, "ok")).public())
         .build()
         .unwrap();
     assert_eq!(get_req(&app, "/").status, 403);
@@ -787,18 +678,15 @@ fn test_classify() {
             env: &Envelope,
             reply: &mut serve_net::HttpReply,
         ) -> serve_net::Outcome {
-            self.app.respond(request, env, reply)
+            self.app.respond(request, env, None, reply).outcome
         }
     }
     let front = Front {
         app: App::builder()
             .route(
-                get("/report", |cx| {
-                    cx.text(200, "r");
-                    Ok(())
-                })
-                .public()
-                .work(serve_net::WorkClass::Cpu),
+                get("/report", |cx| cx.text(200, "r"))
+                    .public()
+                    .work(serve_net::WorkClass::Cpu),
             )
             .build()
             .unwrap(),

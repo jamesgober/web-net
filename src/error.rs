@@ -145,7 +145,7 @@ impl std::error::Error for Error {
 
 impl From<crate::Denial> for Error {
     fn from(d: crate::Denial) -> Self {
-        Self::new(d.status_code(), d.code())
+        Self::new(d.status(), d.code())
     }
 }
 

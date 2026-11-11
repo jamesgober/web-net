@@ -63,6 +63,36 @@ pub struct NoEvents;
 
 impl Events for NoEvents {}
 
+/// A sink the application keeps a handle to, to read what it counted.
+///
+/// ```
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicU32, Ordering};
+/// use web_net::{App, Event, Events, get};
+///
+/// #[derive(Default)]
+/// struct Refusals(AtomicU32);
+/// impl Events for Refusals {
+///     fn event(&self, _: &Event<'_>) {
+///         self.0.fetch_add(1, Ordering::Relaxed);
+///     }
+/// }
+///
+/// let seen = Arc::new(Refusals::default());
+/// let app = App::builder()
+///     .events(Arc::clone(&seen))
+///     .route(get("/", |cx| cx.text(200, "hi")))
+///     .build()?;
+/// serve_net::testing::respond(&app, b"GET /missing HTTP/1.1\r\nHost: a\r\n\r\n");
+/// assert_eq!(seen.0.load(Ordering::Relaxed), 1);
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
+impl<T: Events + ?Sized> Events for std::sync::Arc<T> {
+    fn event(&self, event: &Event<'_>) {
+        (**self).event(event);
+    }
+}
+
 /// A point in web-net's pipeline where a checkpoint runs.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,4 +113,11 @@ pub enum Stage {
 pub trait Checkpoint: Send + Sync + 'static {
     /// Decides at one stage.
     fn check(&self, env: &Envelope, at: Stage) -> Verdict;
+}
+
+/// A checkpoint shared with the code that revokes.
+impl<T: Checkpoint + ?Sized> Checkpoint for std::sync::Arc<T> {
+    fn check(&self, env: &Envelope, at: Stage) -> Verdict {
+        (**self).check(env, at)
+    }
 }

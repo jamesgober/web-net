@@ -36,7 +36,7 @@ fn test_file_changed_between_parts_ends_the_connection() {
             if self.calls.fetch_add(1, Ordering::Relaxed) == 1 {
                 std::fs::write(&self.file, vec![2u8; 100]).unwrap();
             }
-            self.app.respond(req, env, reply)
+            self.app.respond(req, env, None, reply).outcome
         }
     }
     let swap = Swap {
@@ -93,26 +93,21 @@ fn stale() -> App<StaleGate> {
         .route(
             get("/signin", |cx: &mut Cx<'_, Stale>| {
                 cx.set_header("set-cookie", "sid=fresh; Path=/; HttpOnly");
-                cx.text(200, "in");
-                Ok(())
+                cx.text(200, "in")
             })
             .public(),
         )
         .route(
             get("/page", |cx: &mut Cx<'_, Stale>| {
                 cx.set_header("cache-control", "public, max-age=600");
-                cx.text(200, "page");
-                Ok(())
+                cx.text(200, "page")
             })
             .public(),
         )
         .route(
-            get("/api", |cx: &mut Cx<'_, Stale>| {
-                cx.text(200, "api");
-                Ok(())
-            })
-            .public()
-            .cors(Cors::new().origin("https://app.example")),
+            get("/api", |cx: &mut Cx<'_, Stale>| cx.text(200, "api"))
+                .public()
+                .cors(Cors::new().origin("https://app.example")),
         )
         .build()
         .unwrap()

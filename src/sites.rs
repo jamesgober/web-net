@@ -18,15 +18,15 @@ use crate::{App, Gate, NoRender, Open, Render, Served};
 /// let blog = App::builder()
 ///     .host("example.com")
 ///     .base("/blog")
-///     .route(get("/", |cx| { cx.text(200, "blog"); Ok(()) }).public())
+///     .route(get("/", |cx| cx.text(200, "blog")))
 ///     .build()?;
 /// let shop = App::builder()
 ///     .host("shop.example.com")
-///     .route(get("/", |cx| { cx.text(200, "shop"); Ok(()) }).public())
+///     .route(get("/", |cx| cx.text(200, "shop")))
 ///     .build()?;
 /// let main = App::builder()
 ///     .host("example.com")
-///     .route(get("/", |cx| { cx.text(200, "home"); Ok(()) }).public())
+///     .route(get("/", |cx| cx.text(200, "home")))
 ///     .build()?;
 /// let sites = Sites::new().site(main).site(blog).site(shop);
 ///
@@ -75,8 +75,20 @@ impl<G: Gate, E: Render> Sites<G, E> {
             .or_else(|| self.apps.first())
     }
 
-    /// As [`App::serve`] on the chosen application.
-    pub fn serve(
+    /// Serves every site on `addr`, as [`App::listen`] does for one.
+    ///
+    /// # Errors
+    ///
+    /// As [`App::listen`].
+    pub fn listen(
+        self,
+        addr: impl std::net::ToSocketAddrs,
+    ) -> std::result::Result<serve_net::Running, serve_net::ServeError> {
+        crate::app::listen(addr, self)
+    }
+
+    /// As [`App::respond`] on the chosen application.
+    pub fn respond(
         &self,
         req: &HttpRequest<'_>,
         env: &Envelope,
@@ -84,7 +96,7 @@ impl<G: Gate, E: Render> Sites<G, E> {
         reply: &mut HttpReply,
     ) -> Served {
         match self.pick(req) {
-            Some(app) => app.serve(req, env, who, reply),
+            Some(app) => app.respond(req, env, who, reply),
             None => {
                 reply.text(421, "no site is configured");
                 Served {
@@ -99,7 +111,7 @@ impl<G: Gate, E: Render> Sites<G, E> {
 
 impl<G: Gate, E: Render> HttpService for Sites<G, E> {
     fn call(&self, request: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
-        self.serve(request, env, None, reply).outcome
+        self.respond(request, env, None, reply).outcome
     }
 }
 

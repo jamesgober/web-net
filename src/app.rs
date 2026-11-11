@@ -182,21 +182,19 @@ struct Endpoint {
 /// A web application: one site, its routes, and its gate. Built once at
 /// start-up with [`App::builder`] or [`App::with_gate`]; immutable after.
 ///
-/// It is a `serve_net::HttpService`, so it runs on serve-net as it is, and
-/// it has [`respond`](Self::respond) and
-/// [`respond_identified`](Self::respond_identified) for a wrapper that
-/// calls it from its own service.
+/// [`listen`](Self::listen) serves it on an address. It is also a
+/// `serve_net::HttpService`, so it runs on any serve-net server as it is,
+/// and [`respond`](Self::respond) runs it from a wrapper's own service.
 ///
 /// ```
 /// use web_net::{App, get};
 ///
 /// let app = App::builder()
-///     .route(get("/", |cx| { cx.html(200, "<h1>Hello</h1>"); Ok(()) }).public())
+///     .route(get("/", |cx| cx.html(200, "<h1>Hello</h1>")))
 ///     .route(get("/users/:id", |cx| {
 ///         let id: u64 = cx.param_as("id")?;
-///         cx.text(200, &format!("user {id}"));
-///         Ok(())
-///     }).public())
+///         cx.text(200, &format!("user {id}"))
+///     }))
 ///     .build()?;
 ///
 /// let reply = serve_net::testing::respond(&app, b"GET /users/7 HTTP/1.1\r\nHost: a\r\n\r\n");
@@ -221,7 +219,7 @@ pub struct App<G: Gate = Open, E: Render = NoRender> {
 
 impl App<Open> {
     /// A builder with the [`Open`] gate: every visitor is a guest and every
-    /// route is declared public.
+    /// route is public, so routes declare no access.
     #[must_use]
     pub fn builder() -> Builder<Open> {
         Builder::new(Open)
@@ -229,24 +227,12 @@ impl App<Open> {
 }
 
 impl<G: Gate> App<G> {
-    /// A builder with `gate` for authentication and authorization.
+    /// A builder with `gate` for authentication and authorization. Every
+    /// route then declares its access, [`public`](crate::Route::public) or
+    /// [`allow(rule)`](crate::Route::allow), or the build fails.
     #[must_use]
     pub fn with_gate(gate: G) -> Builder<G> {
         Builder::new(gate)
-    }
-}
-
-impl<G: Gate, E: Render> App<G, E> {
-    /// A builder with `gate` and a template engine. Handlers render with
-    /// [`Cx::render`](crate::Cx::render) and the engine's view type (the
-    /// application's own type for a typed engine), or with
-    /// [`Cx::render_view`](crate::Cx::render_view) for an engine that reads
-    /// any [`View`](crate::View).
-    #[must_use]
-    pub fn with(gate: G, engine: E) -> Builder<G, E> {
-        let mut b = Builder::new(gate);
-        b.render = Some(engine);
-        b
     }
 }
 
@@ -459,10 +445,14 @@ impl<G: Gate, E: Render> Builder<G, E> {
         self
     }
 
-    /// The `WWW-Authenticate` challenge sent with a 401 (default
-    /// `Session`).
+    /// The `WWW-Authenticate` value sent with a 401 (default `Session`).
+    ///
+    /// ```
+    /// let app = web_net::App::builder().www_authenticate("Bearer").build()?;
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
-    pub fn challenge(mut self, challenge: &str) -> Self {
+    pub fn www_authenticate(mut self, challenge: &str) -> Self {
         challenge.clone_into(&mut self.challenge);
         self
     }
@@ -541,7 +531,7 @@ impl<G: Gate, E: Render> Builder<G, E> {
             }
         }
         if self.challenge.is_empty() || !self.challenge.bytes().all(|b| (0x20..0x7f).contains(&b)) {
-            problem("challenge", "the challenge must be visible ASCII".into());
+            problem("www_authenticate", "the value must be visible ASCII".into());
         }
 
         if !self.security.valid() {
@@ -617,7 +607,12 @@ impl<G: Gate, E: Render> Builder<G, E> {
                 problem(&r.pattern, "the route has no handler".into());
                 continue;
             }
-            if matches!(r.access, Access::Undeclared) {
+            let mut access = r.access;
+            if matches!(access, Access::Undeclared) && rules_impossible::<G::Rule>() {
+                // A gate without rules has only public routes.
+                access = Access::Public;
+            }
+            if matches!(access, Access::Undeclared) {
                 problem(
                     &r.pattern,
                     "the route declares no access; add .public() or .allow(rule)".into(),
@@ -690,7 +685,7 @@ impl<G: Gate, E: Render> Builder<G, E> {
                 };
                 entries.push(Entry {
                     handler: h,
-                    access: r.access.clone(),
+                    access: access.clone(),
                     names: names.clone(),
                     pattern: r.pattern.as_str().into(),
                     work: r.work,
@@ -776,9 +771,7 @@ impl<G: Gate> Builder<G, NoRender> {
         if !self.routes.is_empty() || !self.hooks.is_empty() {
             b.early.push(Problem {
                 subject: "render".into(),
-                message:
-                    "set the template engine before adding routes and hooks (or use App::with)"
-                        .into(),
+                message: "set the template engine before adding routes and hooks".into(),
             });
         }
         b.render = Some(engine);
@@ -808,6 +801,12 @@ impl<G: Gate, E: Render> fmt::Debug for Builder<G, E> {
             .field("base", &self.base)
             .finish_non_exhaustive()
     }
+}
+
+/// Whether the gate's rule type is [`NoRule`](crate::NoRule), which has no
+/// values: no route can be anything but public.
+fn rules_impossible<R: 'static>() -> bool {
+    std::any::TypeId::of::<R>() == std::any::TypeId::of::<crate::NoRule>()
 }
 
 fn valid_host(h: &str) -> bool {
@@ -884,16 +883,61 @@ enum Placed<'a> {
 }
 
 impl<G: Gate, E: Render> App<G, E> {
-    /// Runs the whole pipeline for one request, authentication included.
-    pub fn respond(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
-        self.serve(req, env, None, reply).outcome
+    /// Serves the application on `addr` (`"127.0.0.1:8080"`): one TCP
+    /// listener per address it resolves to, with serve-net's default
+    /// limits, keep-alive, and workers. For TLS, several listeners, or
+    /// other limits, hand the app to `serve_net::Server::builder()...serve(app)`.
+    ///
+    /// ```no_run
+    /// use web_net::{App, get};
+    ///
+    /// App::builder()
+    ///     .route(get("/", |cx| cx.html(200, "<h1>Hello</h1>")))
+    ///     .build()?
+    ///     .listen("127.0.0.1:8080")?
+    ///     .wait();
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// serve-net's [`ServeError`](serve_net::ServeError): the address does
+    /// not resolve, or a port cannot be bound.
+    pub fn listen(
+        self,
+        addr: impl std::net::ToSocketAddrs,
+    ) -> std::result::Result<serve_net::Running, serve_net::ServeError> {
+        listen(addr, self)
     }
 
-    /// Runs the pipeline and reports what ran and whether a cache in front
-    /// may keep the reply for guests. `who` is `Some` when the caller
-    /// authenticated already (as for
-    /// [`respond_identified`](Self::respond_identified)).
-    pub fn serve(
+    /// Runs the pipeline for one request, for a wrapper that holds the app
+    /// (a gateway). `who` is `Some` when the wrapper authenticated the
+    /// request already: web-net takes it as given and does not call the
+    /// gate's `authenticate` (nor write the gate's cookie). Authorization
+    /// still runs for every route that is not public. `None` runs the whole
+    /// pipeline, as serve-net's `HttpService::call` does.
+    ///
+    /// The report says what ran and whether a cache in front may keep the
+    /// reply for guests.
+    ///
+    /// ```
+    /// use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
+    /// use web_net::{App, Guest, get};
+    ///
+    /// // A front that authenticated every request already.
+    /// struct Front(App);
+    /// impl HttpService for Front {
+    ///     fn call(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
+    ///         self.0.respond(req, env, Some(&Guest), reply).outcome
+    ///     }
+    /// }
+    ///
+    /// let front = Front(App::builder().route(get("/", |cx| cx.text(200, "hi"))).build()?);
+    /// let r = serve_net::testing::respond(&front, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// assert_eq!(r.text(), "hi");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    pub fn respond(
         &self,
         req: &HttpRequest<'_>,
         env: &Envelope,
@@ -907,20 +951,6 @@ impl<G: Gate, E: Render> App<G, E> {
         };
         report.outcome = self.run(req, env, who, reply, &mut report);
         report
-    }
-
-    /// Runs the pipeline for a request whose caller authenticated it
-    /// already: web-net takes `who` as given and does not call the gate's
-    /// `authenticate`. Authorization still runs for every route that is
-    /// not public.
-    pub fn respond_identified(
-        &self,
-        req: &HttpRequest<'_>,
-        env: &Envelope,
-        who: &G::Identity,
-        reply: &mut HttpReply,
-    ) -> Outcome {
-        self.serve(req, env, Some(who), reply).outcome
     }
 
     /// Looks at a head before admission: which route would run and how it
@@ -1642,7 +1672,7 @@ impl<G: Gate, E: Render> App<G, E> {
                 }
             }
         }
-        let status = d.status_code();
+        let status = d.status();
         self.refuse(
             status,
             d.code(),
@@ -1714,6 +1744,7 @@ impl<G: Gate, E: Render> App<G, E> {
                 title: error::title(status),
                 message: error::message(status),
                 reference: &reference,
+                base: &self.shared.base,
             };
             let mut out = Output::new(&mut body, self.shared.page_limit);
             let wrote = engine.error_page(&page, &mut out);
@@ -1789,8 +1820,34 @@ impl<G: Gate, E: Render> App<G, E> {
 
 impl<G: Gate, E: Render> HttpService for App<G, E> {
     fn call(&self, request: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
-        self.respond(request, env, reply)
+        self.respond(request, env, None, reply).outcome
     }
+}
+
+/// One TCP listener per address `addr` resolves to, serving `service`.
+pub(crate) fn listen<S: HttpService + 'static>(
+    addr: impl std::net::ToSocketAddrs,
+    service: S,
+) -> std::result::Result<serve_net::Running, serve_net::ServeError> {
+    let addrs: Vec<std::net::SocketAddr> = addr
+        .to_socket_addrs()
+        .map(Iterator::collect)
+        .unwrap_or_default();
+    let mut server = serve_net::Server::builder();
+    if addrs.is_empty() {
+        // Resolves to nothing: serve-net's validation names the rule.
+        server = server.listener(serve_net::ListenerSpec::tcp(
+            "web-0",
+            &[] as &[std::net::SocketAddr],
+        ));
+    }
+    for (i, a) in addrs.iter().enumerate() {
+        server = server.listener(serve_net::ListenerSpec::tcp(
+            &format!("web-{i}"),
+            std::slice::from_ref(a),
+        ));
+    }
+    server.serve(service)
 }
 
 impl<G: Gate, E: Render> fmt::Debug for App<G, E> {

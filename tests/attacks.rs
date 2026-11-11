@@ -50,32 +50,16 @@ impl Gate for AdminCookie {
 fn guarded() -> App<AdminCookie> {
     App::with_gate(AdminCookie)
         .host("example.com")
-        .route(
-            get("/", |cx: &mut Cx<'_, Who>| {
-                cx.text(200, "home");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx: &mut Cx<'_, Who>| cx.text(200, "home")).public())
         .group(
-            Group::new("/admin")
+            Group::at("/admin")
                 .allow(())
-                .route(get("/", |cx: &mut Cx<'_, Who>| {
-                    cx.text(200, "ADMIN");
-                    Ok(())
-                }))
+                .route(get("/", |cx: &mut Cx<'_, Who>| cx.text(200, "ADMIN")))
                 .route(get("/users/:id", |cx: &mut Cx<'_, Who>| {
-                    cx.text(200, "ADMIN");
-                    Ok(())
+                    cx.text(200, "ADMIN")
                 })),
         )
-        .route(
-            get("/files/*rest", |cx: &mut Cx<'_, Who>| {
-                cx.text(200, "file");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/files/*rest", |cx: &mut Cx<'_, Who>| cx.text(200, "file")).public())
         .build()
         .unwrap()
 }
@@ -126,18 +110,21 @@ fn t01_path_tricks_never_bypass_the_gate() {
     assert_eq!(r.text(), "ADMIN");
 }
 
-/// T-2: a route that forgot its access does not exist.
+/// T-2: a route that forgot its access does not exist, with a gate that
+/// has rules. (With the `Open` gate, whose rule type has no values, every
+/// route is public and nothing can be forgotten.)
 #[test]
 fn t02_forgotten_authorization_does_not_build() {
-    assert!(
-        App::builder()
-            .route(get("/secret", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            }))
-            .build()
-            .is_err()
-    );
+    let err = App::with_gate(AdminCookie)
+        .route(get("/secret", |cx| cx.text(200, "x")))
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("declares no access"), "{err}");
+    let err = App::with_gate(AdminCookie)
+        .group(Group::at("/admin").route(get("/secret", |cx| cx.text(200, "x"))))
+        .build()
+        .unwrap_err();
+    assert!(err.to_string().contains("declares no access"), "{err}");
 }
 
 /// T-3: a forged Host never reaches a site, nor a redirect's Location.
@@ -147,13 +134,7 @@ fn t03_host_header_poisoning() {
         .host("example.com")
         .alias("www.example.com")
         .https_only()
-        .route(
-            get("/", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
     for host in [
@@ -192,7 +173,7 @@ fn t04_open_redirects() {
         .route(
             get("/go", |cx| {
                 let to = cx.query("to")?.unwrap_or_default().into_owned();
-                cx.see_other(&to)
+                cx.redirect(303, &to)
             })
             .public(),
         )
@@ -284,8 +265,7 @@ fn t07_header_injection() {
             get("/", |cx| {
                 let v = cx.query("v")?.unwrap_or_default().into_owned();
                 cx.set_header("x-echo", v);
-                cx.text(200, "ok");
-                Ok(())
+                cx.text(200, "ok")
             })
             .public(),
         )
@@ -322,8 +302,7 @@ fn t08_t09_pollution_and_cookie_tossing() {
         .route(
             get("/", |cx| {
                 let v = cx.query("role")?.unwrap_or_default().into_owned();
-                cx.text(200, &v);
-                Ok(())
+                cx.text(200, &v)
             })
             .public(),
         )
@@ -360,13 +339,7 @@ fn t10_csrf() {
     }
     let app = App::with_gate(S)
         .csrf(web_net::csrf_sec::Csrf::new(*b"attack test csrf key, 32 bytes!!").unwrap())
-        .route(
-            post("/transfer", |cx: &mut Cx<'_, V>| {
-                cx.text(200, "MOVED");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(post("/transfer", |cx: &mut Cx<'_, V>| cx.text(200, "MOVED")).public())
         .build()
         .unwrap();
     for extra in [
@@ -430,13 +403,7 @@ fn t11_t12_traversal_and_special_files() {
 fn t13_hsts_and_frames() {
     let app = App::builder()
         .host("example.com")
-        .route(
-            get("/", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
     let r = TestRequest::new(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
@@ -453,13 +420,7 @@ fn t13_hsts_and_frames() {
 #[test]
 fn t14_cross_origin_reads() {
     let app = App::builder()
-        .route(
-            get("/me", |cx| {
-                cx.text(200, "me");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/me", |cx| cx.text(200, "me")).public())
         .build()
         .unwrap();
     let r = send(
@@ -470,12 +431,9 @@ fn t14_cross_origin_reads() {
     assert!(
         App::builder()
             .route(
-                get("/", |cx| {
-                    cx.text(200, "x");
-                    Ok(())
-                })
-                .public()
-                .cors(Cors::new().any_origin().credentials())
+                get("/", |cx| { cx.text(200, "x") })
+                    .public()
+                    .cors(Cors::new().any_origin().credentials())
             )
             .build()
             .is_err()
@@ -487,13 +445,7 @@ fn t14_cross_origin_reads() {
 fn t15_budgets() {
     let app = App::builder()
         .page_limit(16)
-        .route(
-            get("/*rest", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/*rest", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
     let deep = "/a".repeat(300);

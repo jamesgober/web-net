@@ -101,6 +101,11 @@ impl Render for NoRender {
 
 /// What an error page shows: the status, its generic title and message, and
 /// the request's reference. Never the code or the cause.
+///
+/// `base` is the site's base path (`""` at the root, `/blog` for a site
+/// installed in a folder), so the page's links and stylesheets point inside
+/// the site: [`url`](Self::url) builds them as [`Cx::url`](crate::Cx::url)
+/// does for pages.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ErrorPage<'a> {
@@ -112,15 +117,18 @@ pub struct ErrorPage<'a> {
     pub message: &'a str,
     /// The request's reference, as the visitor quotes it.
     pub reference: &'a str,
+    /// The site's base path: `""` at the root, `/blog` in a folder; never a
+    /// trailing slash.
+    pub base: &'a str,
 }
 
 impl<'a> ErrorPage<'a> {
-    /// An error page's facts, for an engine's own tests (web-net makes the
-    /// real ones).
+    /// An error page's facts at the site's root, for an engine's own tests
+    /// (web-net makes the real ones).
     ///
     /// ```
     /// let p = web_net::ErrorPage::new(404, "Not Found", "The page was not found.", "1a-2");
-    /// assert_eq!((p.status, p.reference), (404, "1a-2"));
+    /// assert_eq!((p.status, p.reference, p.base), (404, "1a-2", ""));
     /// ```
     #[must_use]
     pub const fn new(status: u16, title: &'a str, message: &'a str, reference: &'a str) -> Self {
@@ -129,7 +137,34 @@ impl<'a> ErrorPage<'a> {
             title,
             message,
             reference,
+            base: "",
         }
+    }
+
+    /// The same page for a site installed under `base` (`/blog`).
+    ///
+    /// ```
+    /// let p = web_net::ErrorPage::new(404, "Not Found", "-", "r").with_base("/blog");
+    /// assert_eq!(p.url("/static/site.css"), "/blog/static/site.css");
+    /// ```
+    #[must_use]
+    pub const fn with_base(mut self, base: &'a str) -> Self {
+        self.base = base;
+        self
+    }
+
+    /// A site path as a URL path, the base path in front: what the page's
+    /// links and stylesheets use, so they work for a site in a folder.
+    ///
+    /// ```
+    /// let root = web_net::ErrorPage::new(500, "Server Error", "-", "r");
+    /// assert_eq!(root.url("/"), "/");
+    /// let blog = root.with_base("/blog");
+    /// assert_eq!((blog.url("/"), blog.url("/about")), ("/blog/".to_owned(), "/blog/about".to_owned()));
+    /// ```
+    #[must_use]
+    pub fn url(&self, path: &str) -> String {
+        crate::cx::site_url(self.base, path)
     }
 }
 

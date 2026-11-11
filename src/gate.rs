@@ -24,9 +24,8 @@ pub trait Identity: Send + Sync + 'static {
 
     /// A `Set-Cookie` value the gate wants on the reply (a dead session's
     /// cookie cleared, a pre-session id set). [`App::respond`](crate::App::respond)
-    /// writes it on every exit after authentication, once; with
-    /// [`App::respond_identified`](crate::App::respond_identified) the caller
-    /// authenticated and writes its own. A reply that carries it is never
+    /// writes it on every exit after authentication, once; when the caller
+    /// passes an identity to `respond`, it authenticated and writes its own. A reply that carries it is never
     /// reported as keepable by a cache.
     fn set_cookie(&self) -> Option<&str> {
         None
@@ -85,8 +84,8 @@ pub trait Gate: Send + Sync + 'static {
     /// Runs once per request, before routing. A missing or invalid
     /// credential is a guest (`Ok`); a banned visitor is a denial.
     ///
-    /// Not called by [`App::respond_identified`](crate::App::respond_identified),
-    /// whose caller authenticated already.
+    /// Not called when the caller passes an identity to
+    /// [`App::respond`](crate::App::respond): it authenticated already.
     ///
     /// # Errors
     ///
@@ -186,10 +185,18 @@ impl Denial {
         }
     }
 
-    /// Another client-error status. A status outside 400 to 499 is answered
-    /// as 403: a gate cannot turn a denial into a success or a server error.
+    /// Another client-error status (429, 451, ...). A status outside 400
+    /// to 499 is answered as 403: a gate cannot turn a denial into a success
+    /// or a server error.
+    ///
+    /// ```
+    /// use web_net::Denial;
+    ///
+    /// assert_eq!(Denial::with_status(429, "rate.limited").status(), 429);
+    /// assert_eq!(Denial::with_status(500, "oops").status(), 403);
+    /// ```
     #[must_use]
-    pub const fn status(status: u16, code: &'static str) -> Self {
+    pub const fn with_status(status: u16, code: &'static str) -> Self {
         let kind = if matches!(status, 400..=499) {
             DenialKind::Status(status)
         } else {
@@ -230,7 +237,7 @@ impl Denial {
 
     /// The status answered when no sign-in page applies.
     #[must_use]
-    pub const fn status_code(&self) -> u16 {
+    pub const fn status(&self) -> u16 {
         match self.kind {
             DenialKind::SignIn => 401,
             DenialKind::Forbidden => 403,
@@ -252,7 +259,7 @@ impl fmt::Debug for Denial {
 
 impl fmt::Display for Denial {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "denied ({}): {}", self.status_code(), self.code)
+        write!(f, "denied ({}): {}", self.status(), self.code)
     }
 }
 
@@ -264,12 +271,12 @@ mod tests {
 
     #[test]
     fn test_denial_statuses() {
-        assert_eq!(Denial::sign_in("a").status_code(), 401);
-        assert_eq!(Denial::forbidden("a").status_code(), 403);
-        assert_eq!(Denial::hidden("a").status_code(), 404);
-        assert_eq!(Denial::status(429, "a").status_code(), 429);
-        assert_eq!(Denial::status(200, "a").status_code(), 403);
-        assert_eq!(Denial::status(500, "a").status_code(), 403);
+        assert_eq!(Denial::sign_in("a").status(), 401);
+        assert_eq!(Denial::forbidden("a").status(), 403);
+        assert_eq!(Denial::hidden("a").status(), 404);
+        assert_eq!(Denial::with_status(429, "a").status(), 429);
+        assert_eq!(Denial::with_status(200, "a").status(), 403);
+        assert_eq!(Denial::with_status(500, "a").status(), 403);
         assert_eq!(Denial::forbidden("x.y").code(), "x.y");
     }
 }

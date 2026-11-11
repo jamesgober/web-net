@@ -4,7 +4,7 @@
 use std::sync::OnceLock;
 
 use web_net::csrf_sec::Csrf;
-use web_net::{App, Cors, Cx, Denial, Gate, Group, Hook, Identity, Request, Route, Routes, get, post};
+use web_net::{App, Cors, Cx, Denial, Gate, Group, Hook, Identity, Request, Route, Routes, get};
 
 pub struct Visitor {
     sid: Option<String>,
@@ -31,7 +31,7 @@ impl Gate for FuzzGate {
     type Identity = Visitor;
     type Rule = Rule;
     fn authenticate(&self, req: &Request<'_>) -> Result<Visitor, Denial> {
-        let sid = req.cookie("sid").map_err(|_| Denial::status(400, "fuzz.cookie"))?;
+        let sid = req.cookie("sid").map_err(|_| Denial::with_status(400, "fuzz.cookie"))?;
         Ok(Visitor {
             admin: sid == Some("admin"),
             sid: sid.map(str::to_owned),
@@ -68,57 +68,48 @@ pub fn app() -> &'static App<FuzzGate> {
                 Ok(())
             })
             .route(get("/", |cx: &mut Cx<'_, Visitor>| {
-                cx.text(200, "home");
-                Ok(())
+                cx.text(200, "home")
             }).public())
             .route(get("/login", |cx: &mut Cx<'_, Visitor>| {
                 let next = cx.query("next")?.unwrap_or_default().into_owned();
-                cx.text(200, &next);
-                Ok(())
+                cx.text(200, &next)
             }).public())
             .group(
-                Group::new("/blog")
+                Group::at("/blog")
                     .public()
                     .cors(Cors::new().origin("https://app.a").headers(&["content-type"]))
                     .route(get("/", |cx: &mut Cx<'_, Visitor>| {
-                        cx.text(200, "blog");
-                        Ok(())
+                        cx.text(200, "blog")
                     }))
                     .route(get("/:slug", |cx: &mut Cx<'_, Visitor>| {
-                        let s = cx.param("slug").unwrap_or_default().into_owned();
-                        cx.text(200, &s);
-                        Ok(())
+                        let s = cx.param("slug")?.into_owned();
+                        cx.text(200, &s)
                     }))
                     .route(get("/:year/:slug", |cx: &mut Cx<'_, Visitor>| {
                         let y: u16 = cx.param_as("year")?;
-                        cx.text(200, &y.to_string());
-                        Ok(())
+                        cx.text(200, &y.to_string())
                     })),
             )
             .route(get("/files/*rest", |cx: &mut Cx<'_, Visitor>| {
-                let r = cx.param("rest").unwrap_or_default().into_owned();
-                cx.text(200, &r);
-                Ok(())
+                let r = cx.param("rest")?.into_owned();
+                cx.text(200, &r)
             }).public())
             .route(
                 Route::at("/account")
                     .get(|cx: &mut Cx<'_, Visitor>| {
                         let t = cx.csrf_token()?;
-                        cx.text(200, &t);
-                        Ok(())
+                        cx.text(200, &t)
                     })
                     .post(|cx: &mut Cx<'_, Visitor>| {
                         let f: Email = cx.form()?;
-                        cx.text(200, &f.email);
-                        Ok(())
+                        cx.text(200, &f.email)
                     })
                     .allow(Rule::SignedIn),
             )
             .route(get("/admin", |cx: &mut Cx<'_, Visitor>| {
                 // A field no echoing route can set: the fuzz targets look for it.
                 cx.set_header("x-admin-page", "1");
-                cx.text(200, "admin");
-                Ok(())
+                cx.text(200, "admin")
             }).allow(Rule::Admin))
             .build()
             .expect("fuzz app")

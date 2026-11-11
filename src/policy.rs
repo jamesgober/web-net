@@ -66,7 +66,7 @@ pub enum Cacheable {
     },
 }
 
-/// What [`App::serve`](crate::App::serve) reports with the outcome.
+/// What [`App::respond`](crate::App::respond) reports with the outcome.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Served {

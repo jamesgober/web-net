@@ -61,12 +61,11 @@ pub(crate) type BoxHandler<I, E> = Arc<dyn Handler<I, E>>;
 /// use web_net::{App, get, Route};
 ///
 /// let app = App::builder()
-///     .route(get("/", |cx| { cx.html(200, "<h1>Home</h1>"); Ok(()) }).public())
+///     .route(get("/", |cx| cx.html(200, "<h1>Home</h1>")))
 ///     .route(
 ///         Route::at("/contact")
-///             .get(|cx| { cx.html(200, "<form method=post></form>"); Ok(()) })
-///             .post(|cx| { cx.see_other("/contact/thanks") })
-///             .public()
+///             .get(|cx| cx.html(200, "<form method=post></form>"))
+///             .post(|cx| cx.redirect(303, "/contact/thanks"))
 ///             // A real form gets CSRF protection: Builder::csrf and a gate
 ///             // whose identities carry a binding.
 ///             .csrf_exempt("example: the POST changes nothing"),
@@ -90,8 +89,7 @@ pub(crate) type BoxHandler<I, E> = Arc<dyn Handler<I, E>>;
 ///
 /// let account: Route<User, Rule> = get("/account", |cx: &mut Cx<'_, User>| {
 ///     let name = cx.identity().name.clone();
-///     cx.text(200, &name);
-///     Ok(())
+///     cx.text(200, &name)
 /// })
 /// .allow(Rule::SignedIn);
 /// # let _ = account;
@@ -180,9 +178,11 @@ impl<I: 'static, R, E: Render> Route<I, R, E> {
         self.on(Method::Delete, f)
     }
 
-    /// Anyone may use the route, guests included. Public is a declaration,
-    /// never a default: a route with neither `public` nor `allow` stops the
-    /// build.
+    /// Anyone may use the route, guests included. With a gate that has
+    /// rules, public is a declaration, never a default: a route with neither
+    /// `public` nor `allow` stops the build. With [`Open`](crate::Open),
+    /// whose rule type has no values, every route is public and needs
+    /// neither.
     #[must_use]
     pub fn public(mut self) -> Self {
         self.access = Access::Public;
@@ -314,10 +314,9 @@ method_fn!(
 ///
 /// let app = App::builder()
 ///     .group(
-///         Group::new("/docs")
-///             .public()
-///             .route(get("/", |cx| { cx.text(200, "index"); Ok(()) }))
-///             .route(get("/:page", |cx| { cx.text(200, "page"); Ok(()) })),
+///         Group::at("/docs")
+///             .route(get("/", |cx| cx.text(200, "index")))
+///             .route(get("/:page", |cx| cx.text(200, "page"))),
 ///     )
 ///     .build()?;
 /// # Ok::<(), web_net::BuildError>(())
@@ -333,7 +332,7 @@ pub struct Group<I, R, E: Render = NoRender> {
 impl<I: 'static, R, E: Render> Group<I, R, E> {
     /// A group under `prefix` (`/admin`).
     #[must_use]
-    pub fn new(prefix: impl Into<String>) -> Self {
+    pub fn at(prefix: impl Into<String>) -> Self {
         Self {
             prefix: prefix.into(),
             access: Access::Undeclared,

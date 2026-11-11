@@ -23,13 +23,7 @@ fn h<'a>(r: &'a TestReply, name: &str) -> &'a str {
 #[test]
 fn test_json_error_replies() {
     let app = App::builder()
-        .route(
-            get("/", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
     let r = send(
@@ -58,10 +52,9 @@ fn test_language_and_media() {
     let app = App::builder()
         .route(
             get("/", |cx| {
-                let lang = cx.language(&["en", "fr"]).unwrap_or("en");
-                let media = cx.media(&["text/html", "application/json"]).unwrap_or("-");
-                cx.text(200, &format!("{lang} {media}"));
-                Ok(())
+                let lang = cx.accept_language(&["en", "fr"]).unwrap_or("en");
+                let media = cx.accept(&["text/html", "application/json"]).unwrap_or("-");
+                cx.text(200, &format!("{lang} {media}"))
             })
             .public(),
         )
@@ -79,7 +72,7 @@ fn test_language_and_media() {
 fn api() -> App {
     App::builder()
         .group(
-            Group::new("/api")
+            Group::at("/api")
                 .public()
                 .cors(
                     Cors::new()
@@ -88,25 +81,10 @@ fn api() -> App {
                         .credentials()
                         .max_age(60),
                 )
-                .route(get("/items", |cx| {
-                    cx.text(200, "items");
-                    Ok(())
-                }))
-                .route(
-                    post("/items", |cx| {
-                        cx.text(201, "made");
-                        Ok(())
-                    })
-                    .csrf_exempt("bearer API"),
-                ),
+                .route(get("/items", |cx| cx.text(200, "items")))
+                .route(post("/items", |cx| cx.text(201, "made")).csrf_exempt("bearer API")),
         )
-        .route(
-            get("/private", |cx| {
-                cx.text(200, "p");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/private", |cx| cx.text(200, "p")).public())
         .build()
         .unwrap()
 }
@@ -174,20 +152,14 @@ fn test_cors_actual_replies() {
 fn test_preflight_lists_only_methods_under_the_policy() {
     let app = App::builder()
         .route(
-            get("/items", |cx| {
-                cx.text(200, "items");
-                Ok(())
-            })
-            .public()
-            .cors(Cors::new().origin("https://app.example")),
+            get("/items", |cx| cx.text(200, "items"))
+                .public()
+                .cors(Cors::new().origin("https://app.example")),
         )
         .route(
-            web_net::delete("/items", |cx| {
-                cx.text(200, "gone");
-                Ok(())
-            })
-            .public()
-            .csrf_exempt("test"),
+            web_net::delete("/items", |cx| cx.text(200, "gone"))
+                .public()
+                .csrf_exempt("test"),
         )
         .build()
         .unwrap();
@@ -207,12 +179,9 @@ fn test_preflight_lists_only_methods_under_the_policy() {
 fn test_cors_policy_checked_at_build() {
     let e = App::builder()
         .route(
-            get("/", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public()
-            .cors(Cors::new().any_origin().credentials()),
+            get("/", |cx| cx.text(200, "x"))
+                .public()
+                .cors(Cors::new().any_origin().credentials()),
         )
         .build()
         .unwrap_err();
@@ -225,28 +194,9 @@ fn test_compression() {
     let small = "tiny".to_owned();
     let app = App::builder()
         .compress(Compression::default())
-        .route(
-            get("/", move |cx| {
-                cx.html(200, &page);
-                Ok(())
-            })
-            .public(),
-        )
-        .route(
-            get("/small", move |cx| {
-                cx.html(200, &small);
-                Ok(())
-            })
-            .public(),
-        )
-        .route(
-            get("/png", |cx| {
-                cx.set_header("content-type", "image/png");
-                cx.body_bytes(&[0u8; 4096]);
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", move |cx| cx.html(200, &page)).public())
+        .route(get("/small", move |cx| cx.html(200, &small)).public())
+        .route(get("/png", |cx| cx.bytes(200, "image/png", &[0u8; 4096])).public())
         .build()
         .unwrap();
     let r = send(
@@ -317,7 +267,7 @@ struct Front {
 
 impl HttpService for Front {
     fn call(&self, request: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
-        let served = self.app.serve(request, env, None, reply);
+        let served = self.app.respond(request, env, None, reply);
         self.seen.lock().unwrap().push(served);
         served.outcome
     }
@@ -328,35 +278,27 @@ fn test_cache_policy_and_report() {
     let front = Front {
         app: App::with_gate(CookieGate)
             .route(
-                get("/news", |cx: &mut Cx<'_, Member>| {
-                    cx.text(200, "news");
-                    Ok(())
-                })
-                .public()
-                .cache(CachePolicy::Guests { max_age: 120 }),
+                get("/news", |cx: &mut Cx<'_, Member>| cx.text(200, "news"))
+                    .public()
+                    .cache(CachePolicy::Guests { max_age: 120 }),
             )
             .route(
                 get("/cookie", |cx: &mut Cx<'_, Member>| {
                     cx.set_header("set-cookie", "a=1");
-                    cx.text(200, "c");
-                    Ok(())
+                    cx.text(200, "c")
                 })
                 .public()
                 .cache(CachePolicy::Guests { max_age: 120 }),
             )
             .route(
-                get("/me", |cx: &mut Cx<'_, Member>| {
-                    cx.text(200, "me");
-                    Ok(())
-                })
-                .public()
-                .cache(CachePolicy::NoStore),
+                get("/me", |cx: &mut Cx<'_, Member>| cx.text(200, "me"))
+                    .public()
+                    .cache(CachePolicy::NoStore),
             )
             .route(
                 get("/own", |cx: &mut Cx<'_, Member>| {
                     cx.set_header("cache-control", "max-age=5");
-                    cx.text(200, "own");
-                    Ok(())
+                    cx.text(200, "own")
                 })
                 .public()
                 .cache(CachePolicy::Public { max_age: 60 }),
@@ -452,13 +394,7 @@ fn test_sites_pick_by_host_and_base() {
             b = b.host(h);
         }
         b.base(base)
-            .route(
-                get("/", move |cx| {
-                    cx.text(200, text);
-                    Ok(())
-                })
-                .public(),
-            )
+            .route(get("/", move |cx| cx.text(200, text)).public())
             .build()
             .unwrap()
     };
@@ -483,25 +419,13 @@ fn test_sites_pick_by_host_and_base() {
 #[test]
 fn test_sites_lowercase_site_claims_its_upper_case_paths() {
     let main = App::builder()
-        .route(
-            get("/", |cx| {
-                cx.text(200, "main");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "main")).public())
         .build()
         .unwrap();
     let blog = App::builder()
         .base("/blog")
         .lowercase_paths()
-        .route(
-            get("/x", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/x", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
     let sites = web_net::Sites::new().site(main).site(blog);

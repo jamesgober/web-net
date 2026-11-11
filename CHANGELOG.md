@@ -13,6 +13,63 @@
 
 ---
 
+## [0.10.0] - 2026-11-11
+
+The simplified API. Every public item was checked against one test: the
+common case in a line or two, names a newcomer reads without the docs, one
+way to do each thing (`dev/SIMPLICITY-0.10.md`). This release breaks the
+0.9 API on purpose; the table below is the whole migration.
+
+### Changed (breaking)
+
+| 0.9 | 0.10 |
+|---|---|
+| `serve_net::Server::builder().listener(ListenerSpec::tcp("web", addr)).serve(app)?` | `app.listen(addr)?` (the builder still works for TLS and other limits) |
+| `cx.html(200, s); Ok(())` | `cx.html(200, s)` (also `text`); in the middle of a handler, `cx.html(200, s)?;` |
+| `cx.set_header("content-type", t); cx.body_bytes(b); Ok(())` | `cx.bytes(200, t, b)` |
+| `get(..).public()` with `App::builder()` (the `Open` gate) | `get(..)`; `.public()` still compiles and still declares |
+| `cx.param("x").unwrap_or_default()` | `cx.param("x")?` |
+| `cx.see_other(path)` | `cx.redirect(303, path)` |
+| `cx.media(offers)`, `cx.language(offers)` | `cx.accept(offers)`, `cx.accept_language(offers)` |
+| `cx.body_mut()` | `cx.reply_buffer()` |
+| `App::with(gate, engine)` | `App::with_gate(gate).render(engine)` |
+| `app.respond(req, env, reply)` | `app.respond(req, env, None, reply).outcome`, or the `HttpService::call` it already had |
+| `app.respond_identified(req, env, who, reply)` | `app.respond(req, env, Some(who), reply).outcome` |
+| `app.serve(req, env, who, reply)`, `sites.serve(..)` | `app.respond(req, env, who, reply)`, `sites.respond(..)` |
+| `Denial::status(429, code)`, `denial.status_code()` | `Denial::with_status(429, code)`, `denial.status()` |
+| `Builder::challenge(v)` | `Builder::www_authenticate(v)` |
+| `Group::new(prefix)` | `Group::at(prefix)` |
+
+### Added
+
+- `App::listen(addr)` and `Sites::listen(addr)`: serve on an address with
+  serve-net's defaults, no other dependency.
+- `Cx::bytes(status, content_type, body)`.
+- `ErrorPage::base` and `ErrorPage::url(path)`: an error page of a site
+  installed in a folder (`/blog`) links its stylesheet and home inside the
+  folder. `ErrorPage::with_base` for an engine's tests. `ErrorPage::new` is
+  unchanged.
+- `Events` and `Checkpoint` for `Arc<T>`, so an application can keep a
+  handle to its sink or its lockdown switch.
+
+### Documentation
+
+- `docs/API.md` rewritten as a task-oriented reference with every public
+  item; it and the README compile and run as doctests.
+- `dev/SIMPLICITY-0.10.md`: the audit, each finding, and what was kept with
+  its reason.
+
+### Unchanged
+
+- The `Render` trait, `Output`, `NoRender`, and the view types; `ErrorPage`
+  only gained `base` and `url`.
+- `Gate` and `Identity`; `Denial::sign_in`, `forbidden`, `hidden`,
+  `with_cookie`.
+- Every security rule: with a gate that has rules, a route that declares no
+  access still stops the build.
+
+---
+
 ## [0.9.0] - 2026-11-10
 
 The beta: the pre-1.0 polish pass.
@@ -298,7 +355,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/jamesgober/web-net/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jamesgober/web-net/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jamesgober/web-net/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamesgober/web-net/compare/v0.6.0...v0.7.0

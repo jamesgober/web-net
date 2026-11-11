@@ -69,7 +69,7 @@ impl Gate for &'static Sessions {
     fn authenticate(&self, req: &Request<'_>) -> Result<Visitor, Denial> {
         let sid = req
             .cookie("sid")
-            .map_err(|_| Denial::status(400, "site.cookie_twice"))?;
+            .map_err(|_| Denial::with_status(400, "site.cookie_twice"))?;
         if let Some(sid) = sid {
             if let Some(user) = self.by_id.lock().ok().and_then(|m| m.get(sid).cloned()) {
                 return Ok(Visitor {
@@ -81,7 +81,7 @@ impl Gate for &'static Sessions {
         }
         let pre = req
             .cookie("pre")
-            .map_err(|_| Denial::status(400, "site.cookie_twice"))?;
+            .map_err(|_| Denial::with_status(400, "site.cookie_twice"))?;
         match pre.filter(|p| p.len() == 48 && p.bytes().all(|b| b.is_ascii_hexdigit())) {
             Some(p) => Ok(Visitor {
                 user: None,
@@ -89,7 +89,7 @@ impl Gate for &'static Sessions {
                 fresh: None,
             }),
             None => {
-                let id = random_id().map_err(|_| Denial::status(503, "site.random"))?;
+                let id = random_id().map_err(|_| Denial::with_status(503, "site.random"))?;
                 let cookie = format!("pre={id}; Path=/; HttpOnly; SameSite=Lax");
                 Ok(Visitor {
                     user: None,
@@ -152,7 +152,7 @@ fn render(
         message: message.into(),
     };
     engine
-        .render(name, &page, cx.body_mut())
+        .render(name, &page, cx.reply_buffer())
         .map_err(|e| Error::internal("site.render").with_source(e))?;
     cx.set_header("content-type", "text/html; charset=utf-8");
     Ok(())
@@ -205,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "set-cookie",
                             format!("sid={sid}; Path=/; HttpOnly; SameSite=Lax"),
                         );
-                        return cx.see_other("/");
+                        return cx.redirect(303, "/");
                     }
                     cx.status(422);
                     render(cx, engine, "login", "Wrong user or password.")
@@ -219,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = m.remove(&id);
                 }
                 cx.set_header("set-cookie", "sid=; Path=/; Max-Age=0");
-                cx.see_other("/")
+                cx.redirect(303, "/")
             })
             .public(),
         )
@@ -239,10 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .build()?;
 
-    let server = serve_net::Server::builder()
-        .listener(serve_net::ListenerSpec::tcp("web", "127.0.0.1:8092"))
-        .serve(app)?;
     println!("listening on http://127.0.0.1:8092/");
-    server.wait();
+    app.listen("127.0.0.1:8092")?.wait();
     Ok(())
 }

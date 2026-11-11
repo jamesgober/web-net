@@ -21,10 +21,10 @@ fn test_ten_thousand_routes() {
             get(pattern, move |cx| {
                 let p = cx
                     .param("id")
-                    .or_else(|| cx.param("rest"))
-                    .or_else(|| cx.param("x"));
-                cx.text(200, &format!("{i}:{}", p.unwrap_or_default()));
-                Ok(())
+                    .or_else(|_| cx.param("rest"))
+                    .or_else(|_| cx.param("x"))
+                    .unwrap_or_default();
+                cx.text(200, &format!("{i}:{p}"))
             })
             .public(),
         );
