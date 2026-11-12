@@ -64,21 +64,9 @@ fn app_with(routes: usize, security: web_net::SecurityHeaders) -> Shared<App> {
         .host("example.com")
         .security_headers(security);
     for i in 0..routes {
-        b = b.route(
-            get(format!("/section-{i}/items/:id"), |cx| {
-                cx.text(200, "item");
-                Ok(())
-            })
-            .public(),
-        );
+        b = b.route(get(format!("/section-{i}/items/:id"), |cx| cx.text(200, "item")).public());
     }
-    b = b.route(
-        get("/users/:id", |cx| {
-            cx.text(200, "user 7");
-            Ok(())
-        })
-        .public(),
-    );
+    b = b.route(get("/users/:id", |cx| cx.text(200, "user 7")).public());
     Shared(std::sync::Arc::new(b.build().expect("bench app")))
 }
 

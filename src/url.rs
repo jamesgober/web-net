@@ -11,6 +11,16 @@ use std::borrow::Cow;
 use std::fmt;
 
 /// What a request path was refused for (answered with 400).
+///
+/// ```
+/// use web_net::{App, UrlError, get};
+///
+/// let app = App::builder().route(get("/", |cx| cx.text(200, "ok"))).build()?;
+/// let r = serve_net::testing::respond(&app, b"GET /a%2Fb HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.status, 400);
+/// assert_eq!(UrlError::EncodedSlash.code(), "url.encoded_slash");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UrlError {
@@ -32,6 +42,13 @@ pub enum UrlError {
 
 impl UrlError {
     /// A stable code for logs and events.
+    ///
+    /// ```
+    /// use web_net::UrlError;
+    ///
+    /// assert_eq!(UrlError::BadEscape.code(), "url.bad_escape");
+    /// assert_eq!(UrlError::NotUtf8.code(), "url.not_utf8");
+    /// ```
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
@@ -65,6 +82,20 @@ impl std::error::Error for UrlError {}
 
 /// What a site does with a trailing slash. One policy per site, so a page has
 /// one address.
+///
+/// ```
+/// use web_net::{App, TrailingSlash, get};
+///
+/// let strict = App::builder().route(get("/about", |cx| cx.text(200, "about"))).build()?;
+/// let loose = App::builder()
+///     .trailing_slash(TrailingSlash::Ignore)
+///     .route(get("/about", |cx| cx.text(200, "about")))
+///     .build()?;
+/// let req = b"GET /about/ HTTP/1.1\r\nHost: localhost\r\n\r\n";
+/// assert_eq!(serve_net::testing::respond(&strict, req).header("location"), Some(&b"/about"[..]));
+/// assert_eq!(serve_net::testing::respond(&loose, req).text(), "about");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrailingSlash {
@@ -257,6 +288,14 @@ pub(crate) fn normalize(raw: &str, lowercase: bool) -> Result<Cow<'_, str>, UrlE
                 if core::str::from_utf8(decoded).is_err() {
                     return Err(UrlError::NotUtf8);
                 }
+                // C1 controls (U+0080 to U+009F) are 0xC2 0x80..=0x9F in
+                // UTF-8; in valid UTF-8 a 0xC2 is always a lead byte.
+                if decoded
+                    .windows(2)
+                    .any(|w| w[0] == 0xC2 && (0x80..=0x9F).contains(&w[1]))
+                {
+                    return Err(UrlError::Control);
+                }
                 segs.push((start, buf.len()));
                 trailing = false;
             }
@@ -349,6 +388,13 @@ mod tests {
         assert_eq!(n("/a%00"), Err(UrlError::Control));
         assert_eq!(n("/a%0d%0a"), Err(UrlError::Control));
         assert_eq!(n("/a%7f"), Err(UrlError::Control));
+        // C1 controls (U+0080 to U+009F, NEL among them) are controls too.
+        assert_eq!(n("/%c2%80"), Err(UrlError::Control));
+        assert_eq!(n("/a%C2%85b"), Err(UrlError::Control));
+        assert_eq!(n("/a/%c2%9f"), Err(UrlError::Control));
+        // Their neighbours are text.
+        assert_eq!(n("/%c2%a0").as_deref(), Ok("/%C2%A0"));
+        assert_eq!(n("/caf%c3%a9").as_deref(), Ok("/caf%C3%A9"));
         assert_eq!(n("/a%zz"), Err(UrlError::BadEscape));
         assert_eq!(n("/a%4"), Err(UrlError::BadEscape));
         assert_eq!(n("/a%ff"), Err(UrlError::NotUtf8));
@@ -405,9 +451,10 @@ mod tests {
             proptest::collection::vec(piece, 0..12).prop_map(|v| format!("/{}", v.concat()))
         }
 
-        /// A segment's bytes as decoded text: no `/`, `\\`, or control.
+        /// A segment's bytes as decoded text: no `/`, `\\`, or control
+        /// (C0, DEL, or C1).
         fn segment() -> impl Strategy<Value = String> {
-            "[^/\\\\\\x00-\\x1f\\x7f]{1,8}"
+            "[^/\\\\\\x00-\\x1f\\x7f-\\x{9f}]{1,8}"
                 .prop_filter("not a dot segment", |s| s != "." && s != "..")
         }
 

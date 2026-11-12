@@ -60,25 +60,15 @@ fn test_warm_pipeline_adds_no_allocation() {
     let app = App::builder()
         .host("example.com")
         .base("/app")
-        .route(
-            get("/", |cx| {
-                cx.text(200, "home");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "home")).public())
         .group(
-            Group::new("/users")
+            Group::at("/users")
                 .public()
                 .route(get("/:id", |cx| {
-                    let ok = cx.param("id").is_some_and(|id| id == "7");
-                    cx.text(200, if ok { "user 7" } else { "other" });
-                    Ok(())
+                    let ok = cx.param("id").is_ok_and(|id| id == "7");
+                    cx.text(200, if ok { "user 7" } else { "other" })
                 }))
-                .route(get("/:id/posts/:post", |cx| {
-                    cx.text(200, "post");
-                    Ok(())
-                })),
+                .route(get("/:id/posts/:post", |cx| cx.text(200, "post"))),
         )
         .build()
         .unwrap();

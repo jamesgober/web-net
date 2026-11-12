@@ -2,7 +2,7 @@
 //! engine such as Luminess implements), with a view that borrows.
 
 use serve_net::testing::respond;
-use web_net::{App, Cx, ErrorPage, Guest, Open, Output, Render, RenderError, TemplateId, get};
+use web_net::{App, Context, ErrorPage, Guest, Open, Output, Render, RenderError, TemplateId, get};
 
 /// The application's page, borrowing what the handler has.
 struct Page<'a> {
@@ -48,10 +48,11 @@ impl Render for Pages {
 
 #[test]
 fn test_typed_engine_renders_borrowed_views() {
-    let app = App::with(Open, Pages)
+    let app = App::with_gate(Open)
+        .render(Pages)
         .page_limit(64)
         .route(
-            get("/", |cx: &mut Cx<'_, Guest, Pages>| {
+            get("/", |cx: &mut Context<'_, Guest, Pages>| {
                 let items = vec!["a".to_owned(), "b".to_owned()];
                 let title = String::from("Hi <you>");
                 cx.render(&Page {
@@ -63,7 +64,7 @@ fn test_typed_engine_renders_borrowed_views() {
             .template("list"),
         )
         .route(
-            get("/big", |cx: &mut Cx<'_, Guest, Pages>| {
+            get("/big", |cx: &mut Context<'_, Guest, Pages>| {
                 let items = vec!["x".repeat(100)];
                 cx.render(&Page {
                     title: "big",
@@ -75,28 +76,63 @@ fn test_typed_engine_renders_borrowed_views() {
         )
         .build()
         .unwrap();
-    let r = respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    let r = respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(r.text(), "<h1>Hi &lt;you></h1><li>a<li>b");
     // The budget holds even for an engine that writes into the buffer.
-    let r = respond(&app, b"GET /big HTTP/1.1\r\nHost: a\r\n\r\n");
+    let r = respond(&app, b"GET /big HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(r.status, 500);
     // Error pages are the engine's.
-    let r = respond(&app, b"GET /nope HTTP/1.1\r\nHost: a\r\n\r\n");
+    let r = respond(&app, b"GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!((r.status, r.text()), (404, "[404 Not Found]"));
 }
 
 #[test]
 fn test_engine_after_routes_is_a_build_error() {
     let e = App::builder()
-        .route(
-            get("/", |cx| {
-                cx.text(200, "x");
-                Ok(())
-            })
-            .public(),
-        )
+        .route(get("/", |cx| cx.text(200, "x")).public())
         .render(Pages)
         .build()
         .unwrap_err();
     assert!(e.problems().iter().any(|p| p.subject == "render"), "{e}");
+}
+
+struct Themed;
+impl Render for Themed {
+    type View<'a> = str;
+    fn template(&self, _: &str) -> Option<TemplateId> {
+        None
+    }
+    fn render(&self, _: TemplateId, _: &str, _: &mut Output<'_>) -> Result<(), RenderError> {
+        Ok(())
+    }
+    fn error_page(&self, page: &ErrorPage<'_>, out: &mut Output<'_>) -> Result<bool, RenderError> {
+        let css = page.url("/static/site.css")?;
+        let home = page.url("/")?;
+        out.write_str(&format!("<link href=\"{css}\"><a href=\"{home}\">home</a>"))?;
+        Ok(true)
+    }
+}
+
+#[test]
+fn test_error_page_links_inside_the_base_path() {
+    for (base, css, home) in [
+        ("/blog", "/blog/static/site.css", "/blog/"),
+        ("", "/static/site.css", "/"),
+    ] {
+        let mut b = App::builder().render(Themed);
+        if !base.is_empty() {
+            b = b.base(base);
+        }
+        let app = b.build().unwrap();
+        let r = serve_net::testing::respond(
+            &app,
+            format!("GET {base}/missing HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+        );
+        assert_eq!(r.status, 404);
+        assert_eq!(
+            r.text(),
+            format!("<link href=\"{css}\"><a href=\"{home}\">home</a>"),
+            "base {base:?}"
+        );
+    }
 }

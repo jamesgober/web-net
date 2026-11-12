@@ -8,6 +8,14 @@
 use crate::url;
 
 /// The most parameters (named and wildcard) one route pattern may have.
+///
+/// ```
+/// use web_net::{App, MAX_PARAMS, get};
+///
+/// assert_eq!(MAX_PARAMS, 8);
+/// let nine = "/:a/:b/:c/:d/:e/:f/:g/:h/:i";
+/// assert!(App::builder().route(get(nine, |cx| cx.text(200, "ok"))).build().is_err());
+/// ```
 pub const MAX_PARAMS: usize = 8;
 
 /// One segment of a route pattern.

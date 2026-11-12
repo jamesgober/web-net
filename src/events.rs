@@ -12,6 +12,28 @@ use serve_net::{Envelope, Verdict};
 use crate::RequestId;
 
 /// What kind of thing happened.
+///
+/// ```
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicU32, Ordering};
+/// use web_net::{App, Event, EventKind, Events, get};
+///
+/// #[derive(Default)]
+/// struct Refusals(AtomicU32);
+/// impl Events for Refusals {
+///     fn event(&self, e: &Event<'_>) {
+///         if e.kind == EventKind::Refused {
+///             self.0.fetch_add(1, Ordering::Relaxed);
+///         }
+///     }
+/// }
+///
+/// let refusals = Arc::new(Refusals::default());
+/// let app = App::builder().events(Arc::clone(&refusals)).build()?;
+/// serve_net::testing::respond(&app, b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(refusals.0.load(Ordering::Relaxed), 1);
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventKind {
@@ -29,6 +51,25 @@ pub enum EventKind {
 }
 
 /// One event.
+///
+/// ```
+/// use std::sync::{Arc, Mutex};
+/// use web_net::{App, Event, Events, get};
+///
+/// #[derive(Default)]
+/// struct Codes(Mutex<Vec<(u16, &'static str)>>);
+/// impl Events for Codes {
+///     fn event(&self, e: &Event<'_>) {
+///         self.0.lock().unwrap().push((e.status, e.code));
+///     }
+/// }
+///
+/// let codes = Arc::new(Codes::default());
+/// let app = App::builder().events(Arc::clone(&codes)).route(get("/", |cx| cx.text(200, "hi"))).build()?;
+/// serve_net::testing::respond(&app, b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(*codes.0.lock().unwrap(), [(404, "route.none")]);
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct Event<'a> {
@@ -50,6 +91,24 @@ pub struct Event<'a> {
 /// implementation, [`NoEvents`], reports nothing.
 ///
 /// Called on the request path: keep it to a counter or a queue push.
+///
+/// ```
+/// use std::sync::atomic::{AtomicU32, Ordering};
+/// use web_net::{Event, Events};
+///
+/// // Counts every event; the app reports refusals, denials, and failures here.
+/// #[derive(Default)]
+/// struct Counter(AtomicU32);
+/// impl Events for Counter {
+///     fn event(&self, _: &Event<'_>) {
+///         self.0.fetch_add(1, Ordering::Relaxed);
+///     }
+/// }
+///
+/// let app = web_net::App::builder().events(Counter::default()).build()?;
+/// # let _ = app;
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 pub trait Events: Send + Sync + 'static {
     /// One event.
     fn event(&self, event: &Event<'_>) {
@@ -58,12 +117,69 @@ pub trait Events: Send + Sync + 'static {
 }
 
 /// Reports nothing.
+///
+/// ```
+/// use web_net::{App, NoEvents};
+///
+/// // The default; setting it again turns reporting off.
+/// let app = App::builder().events(NoEvents).build()?;
+/// # let _ = app;
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoEvents;
 
 impl Events for NoEvents {}
 
+/// A sink the application keeps a handle to, to read what it counted.
+///
+/// ```
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicU32, Ordering};
+/// use web_net::{App, Event, Events, get};
+///
+/// #[derive(Default)]
+/// struct Refusals(AtomicU32);
+/// impl Events for Refusals {
+///     fn event(&self, _: &Event<'_>) {
+///         self.0.fetch_add(1, Ordering::Relaxed);
+///     }
+/// }
+///
+/// let seen = Arc::new(Refusals::default());
+/// let app = App::builder()
+///     .events(Arc::clone(&seen))
+///     .route(get("/", |cx| cx.text(200, "hi")))
+///     .build()?;
+/// serve_net::testing::respond(&app, b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(seen.0.load(Ordering::Relaxed), 1);
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
+impl<T: Events + ?Sized> Events for std::sync::Arc<T> {
+    fn event(&self, event: &Event<'_>) {
+        (**self).event(event);
+    }
+}
+
 /// A point in web-net's pipeline where a checkpoint runs.
+///
+/// ```
+/// use serve_net::{Envelope, Verdict};
+/// use web_net::{App, Checkpoint, Stage, get};
+///
+/// // Stops requests once their access check passed.
+/// struct AfterAccess;
+/// impl Checkpoint for AfterAccess {
+///     fn check(&self, _: &Envelope, at: Stage) -> Verdict {
+///         if at == Stage::Authorized { Verdict::Deny { status: 503 } } else { Verdict::Pass }
+///     }
+/// }
+///
+/// let app = App::builder().checkpoint(AfterAccess).route(get("/", |cx| cx.text(200, "hi"))).build()?;
+/// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.status, 503);
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
@@ -80,7 +196,38 @@ pub enum Stage {
 ///
 /// A checkpoint backed by remote state fails closed (denies) when the
 /// remote cannot be reached.
+///
+/// ```
+/// use std::sync::Arc;
+/// use std::sync::atomic::{AtomicBool, Ordering};
+/// use serve_net::testing::respond;
+/// use serve_net::{Envelope, Verdict};
+/// use web_net::{App, Checkpoint, Stage, get};
+///
+/// #[derive(Default)]
+/// struct Lockdown(AtomicBool);
+/// impl Checkpoint for Lockdown {
+///     fn check(&self, _: &Envelope, _: Stage) -> Verdict {
+///         if self.0.load(Ordering::Relaxed) { Verdict::Deny { status: 503 } } else { Verdict::Pass }
+///     }
+/// }
+///
+/// let lockdown = Arc::new(Lockdown::default());
+/// let app = App::builder().checkpoint(Arc::clone(&lockdown)).route(get("/", |cx| cx.text(200, "hi"))).build()?;
+/// let req = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+/// assert_eq!(respond(&app, req).status, 200);
+/// lockdown.0.store(true, Ordering::Relaxed);
+/// assert_eq!(respond(&app, req).status, 503);
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 pub trait Checkpoint: Send + Sync + 'static {
     /// Decides at one stage.
     fn check(&self, env: &Envelope, at: Stage) -> Verdict;
+}
+
+/// A checkpoint shared with the code that revokes.
+impl<T: Checkpoint + ?Sized> Checkpoint for std::sync::Arc<T> {
+    fn check(&self, env: &Envelope, at: Stage) -> Verdict {
+        (**self).check(env, at)
+    }
 }

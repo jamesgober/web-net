@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use web_net::csrf_sec::{Csrf, OsPads, PadSource};
+use web_net::csrf_sec::{Csrf, OsRandom, RandomSource};
 use web_net::form_net::{self, Store};
-use web_net::{App, Assets, Cx, Denial, Error, Gate, Identity, Request, Route, get, post};
+use web_net::{App, Assets, Context, Denial, Error, Gate, Identity, Request, Route, get, post};
 
 // ---------------------------------------------------------------- the gate
 
@@ -52,7 +52,7 @@ struct Sessions {
 
 fn random_id() -> Result<String, Error> {
     let mut b = [0u8; 24];
-    OsPads
+    OsRandom
         .fill(&mut b)
         .map_err(|e| Error::internal("site.random").with_source(e))?;
     Ok(b.iter().fold(String::with_capacity(48), |mut s, x| {
@@ -69,7 +69,7 @@ impl Gate for &'static Sessions {
     fn authenticate(&self, req: &Request<'_>) -> Result<Visitor, Denial> {
         let sid = req
             .cookie("sid")
-            .map_err(|_| Denial::status(400, "site.cookie_twice"))?;
+            .map_err(|_| Denial::with_status(400, "site.cookie_twice"))?;
         if let Some(sid) = sid {
             if let Some(user) = self.by_id.lock().ok().and_then(|m| m.get(sid).cloned()) {
                 return Ok(Visitor {
@@ -81,7 +81,7 @@ impl Gate for &'static Sessions {
         }
         let pre = req
             .cookie("pre")
-            .map_err(|_| Denial::status(400, "site.cookie_twice"))?;
+            .map_err(|_| Denial::with_status(400, "site.cookie_twice"))?;
         match pre.filter(|p| p.len() == 48 && p.bytes().all(|b| b.is_ascii_hexdigit())) {
             Some(p) => Ok(Visitor {
                 user: None,
@@ -89,7 +89,7 @@ impl Gate for &'static Sessions {
                 fresh: None,
             }),
             None => {
-                let id = random_id().map_err(|_| Denial::status(503, "site.random"))?;
+                let id = random_id().map_err(|_| Denial::with_status(503, "site.random"))?;
                 let cookie = format!("pre={id}; Path=/; HttpOnly; SameSite=Lax");
                 Ok(Visitor {
                     user: None,
@@ -140,7 +140,7 @@ fn engine() -> luminess::Engine<Page> {
 }
 
 fn render(
-    cx: &mut Cx<'_, Visitor>,
+    cx: &mut Context<'_, Visitor>,
     engine: &luminess::Engine<Page>,
     name: &str,
     message: &str,
@@ -152,7 +152,7 @@ fn render(
         message: message.into(),
     };
     engine
-        .render(name, &page, cx.body_mut())
+        .render(name, &page, cx.reply_buffer())
         .map_err(|e| Error::internal("site.render").with_source(e))?;
     cx.set_header("content-type", "text/html; charset=utf-8");
     Ok(())
@@ -176,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A real site loads a persisted key; a fresh one per start means every
     // open form fails after a restart.
     let mut key = [0u8; 32];
-    OsPads.fill(&mut key)?;
+    OsRandom.fill(&mut key)?;
 
     let app = App::with_gate(sessions)
         .host("127.0.0.1:8092")
@@ -186,15 +186,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .assets(Assets::new("/static", public))
         .health("/healthz")
         .route(
-            get("/", |cx: &mut Cx<'_, Visitor>| {
+            get("/", |cx: &mut Context<'_, Visitor>| {
                 render(cx, engine, "home", "")
             })
             .public(),
         )
         .route(
             Route::at("/login")
-                .get(|cx: &mut Cx<'_, Visitor>| render(cx, engine, "login", ""))
-                .post(move |cx: &mut Cx<'_, Visitor>| {
+                .get(|cx: &mut Context<'_, Visitor>| render(cx, engine, "login", ""))
+                .post(move |cx: &mut Context<'_, Visitor>| {
                     let form: Login = cx.form()?;
                     if form.user == "demo" && form.password.expose() == "demo" {
                         let sid = random_id()?;
@@ -205,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "set-cookie",
                             format!("sid={sid}; Path=/; HttpOnly; SameSite=Lax"),
                         );
-                        return cx.see_other("/");
+                        return cx.redirect(303, "/");
                     }
                     cx.status(422);
                     render(cx, engine, "login", "Wrong user or password.")
@@ -213,24 +213,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .public(),
         )
         .route(
-            post("/logout", move |cx: &mut Cx<'_, Visitor>| {
+            post("/logout", move |cx: &mut Context<'_, Visitor>| {
                 let id = cx.identity().id.clone();
                 if let Ok(mut m) = sessions.by_id.lock() {
                     let _ = m.remove(&id);
                 }
                 cx.set_header("set-cookie", "sid=; Path=/; Max-Age=0");
-                cx.see_other("/")
+                cx.redirect(303, "/")
             })
             .public(),
         )
         .route(
-            get("/account", |cx: &mut Cx<'_, Visitor>| {
+            get("/account", |cx: &mut Context<'_, Visitor>| {
                 render(cx, engine, "account", "")
             })
             .allow(Rule::SignedIn),
         )
         .route(
-            post("/account/avatar", move |cx: &mut Cx<'_, Visitor>| {
+            post("/account/avatar", move |cx: &mut Context<'_, Visitor>| {
                 let upload = cx.upload(store)?;
                 let n = upload.files("avatar").count();
                 render(cx, engine, "account", &format!("Received {n} file(s)."))
@@ -239,10 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .build()?;
 
-    let server = serve_net::Server::builder()
-        .listener(serve_net::ListenerSpec::tcp("web", "127.0.0.1:8092"))
-        .serve(app)?;
     println!("listening on http://127.0.0.1:8092/");
-    server.wait();
+    app.listen("127.0.0.1:8092")?.wait();
     Ok(())
 }

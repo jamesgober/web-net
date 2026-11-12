@@ -40,6 +40,21 @@ pub struct Cors {
 
 impl Cors {
     /// A policy that allows no origin yet.
+    ///
+    /// ```
+    /// use web_net::{App, Cors, get};
+    ///
+    /// // A policy that allows no origin is refused at build.
+    /// let empty = App::builder().route(get("/api", |cx| cx.text(200, "[]")).cors(Cors::new())).build();
+    /// assert!(empty.is_err());
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/api", |cx| cx.text(200, "[]")).cors(Cors::new().origin("https://app.example.com")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /api HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\n\r\n");
+    /// assert_eq!(r.header("access-control-allow-origin"), Some(&b"https://app.example.com"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -50,6 +65,18 @@ impl Cors {
 
     /// Allows an origin, exactly as browsers send it
     /// (`https://app.example.com`, with a port when it has one).
+    ///
+    /// ```
+    /// use web_net::{App, Cors, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/api", |cx| cx.text(200, "[]")).cors(Cors::new().origin("https://app.example.com")))
+    ///     .build()?;
+    /// let from = |origin: &str| serve_net::testing::respond(&app, format!("GET /api HTTP/1.1\r\nHost: localhost\r\nOrigin: {origin}\r\n\r\n").as_bytes());
+    /// assert!(from("https://app.example.com").header("access-control-allow-origin").is_some());
+    /// assert!(from("https://other.example").header("access-control-allow-origin").is_none());
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn origin(mut self, origin: &str) -> Self {
         self.origins.push(origin.to_ascii_lowercase().into());
@@ -58,6 +85,17 @@ impl Cors {
 
     /// Allows every origin (answered with `*`). Not with
     /// [`credentials`](Self::credentials): the build refuses that pair.
+    ///
+    /// ```
+    /// use web_net::{App, Cors, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/api", |cx| cx.text(200, "[]")).cors(Cors::new().any_origin()))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /api HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\n\r\n");
+    /// assert_eq!(r.header("access-control-allow-origin"), Some(&b"*"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn any_origin(mut self) -> Self {
         self.any = true;
@@ -66,6 +104,17 @@ impl Cors {
 
     /// Request fields a cross-origin request may send beyond the simple ones
     /// (`content-type`, `x-csrf-token`).
+    ///
+    /// ```
+    /// use web_net::{App, Cors, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/api", |cx| cx.text(200, "[]")).cors(Cors::new().origin("https://app.example.com").headers(&["x-csrf-token"])))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"OPTIONS /api HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\nAccess-Control-Request-Method: GET\r\nAccess-Control-Request-Headers: x-csrf-token\r\n\r\n");
+    /// assert_eq!(r.header("access-control-allow-headers"), Some(&b"x-csrf-token"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn headers(mut self, names: &[&str]) -> Self {
         self.headers.extend(
@@ -77,6 +126,17 @@ impl Cors {
     }
 
     /// Reply fields a cross-origin script may read beyond the simple ones.
+    ///
+    /// ```
+    /// use web_net::{App, Cors, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/api", |cx| cx.text(200, "[]")).cors(Cors::new().origin("https://app.example.com").expose(&["x-total"])))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /api HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\n\r\n");
+    /// assert_eq!(r.header("access-control-expose-headers"), Some(&b"x-total"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn expose(mut self, names: &[&str]) -> Self {
         self.expose.extend(
@@ -88,6 +148,21 @@ impl Cors {
     }
 
     /// Cross-origin requests may carry cookies.
+    ///
+    /// ```
+    /// use web_net::{App, Cors, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/api", |cx| cx.text(200, "[]")).cors(Cors::new().origin("https://app.example.com").credentials()))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /api HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\n\r\n");
+    /// assert_eq!(r.header("access-control-allow-credentials"), Some(&b"true"[..]));
+    ///
+    /// // Any origin with credentials is refused at build.
+    /// let open = App::builder().route(get("/api", |cx| cx.text(200, "[]")).cors(Cors::new().any_origin().credentials()));
+    /// assert!(open.build().is_err());
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn credentials(mut self) -> Self {
         self.credentials = true;
@@ -95,6 +170,17 @@ impl Cors {
     }
 
     /// How long a browser may keep a preflight's answer (default 300 s).
+    ///
+    /// ```
+    /// use web_net::{App, Cors, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/api", |cx| cx.text(200, "[]")).cors(Cors::new().origin("https://app.example.com").headers(&["x-csrf-token"]).max_age(600)))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"OPTIONS /api HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example.com\r\nAccess-Control-Request-Method: GET\r\nAccess-Control-Request-Headers: x-csrf-token\r\n\r\n");
+    /// assert_eq!(r.header("access-control-max-age"), Some(&b"600"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn max_age(mut self, seconds: u32) -> Self {
         self.max_age = seconds;

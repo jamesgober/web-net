@@ -6,7 +6,8 @@ use serve_net::testing::{TestReply, respond};
 use web_net::csrf_sec::Csrf;
 use web_net::form_net::{self, FormError, FromForm};
 use web_net::{
-    App, Cx, Denial, Error, Event, EventKind, Events, Gate, Identity, Request, Route, get, post,
+    App, Context, Denial, Error, Event, EventKind, Events, Gate, Identity, Request, Route, get,
+    post,
 };
 
 const KEY: [u8; 32] = *b"web-net actions test key 32 byte";
@@ -63,24 +64,19 @@ fn app(log: &'static Log) -> App<Sessions> {
         .events(log)
         .redirect_hosts(&["accounts.example.com"])
         .route(
-            get("/token", |cx: &mut Cx<'_, Visitor>| {
+            get("/token", |cx: &mut Context<'_, Visitor>| {
                 let t = cx.csrf_token()?;
-                cx.text(200, &t);
-                Ok(())
+                cx.text(200, &t)
             })
             .public(),
         )
         .route(
-            post("/email", |cx: &mut Cx<'_, Visitor>| {
+            post("/email", |cx: &mut Context<'_, Visitor>| {
                 match cx.form::<Email>() {
-                    Ok(f) => {
-                        cx.text(200, &f.email);
-                        Ok(())
-                    }
+                    Ok(f) => cx.text(200, &f.email),
                     // The action pattern: a form with errors comes back with 422.
                     Err(e) if e.status_hint() == 422 || e.status_hint() == 400 => {
-                        cx.status(422).html(422, "<p>check the form</p>");
-                        Ok(())
+                        cx.html(422, "<p>check the form</p>")
                     }
                     Err(e) => Err(e.into()),
                 }
@@ -88,40 +84,36 @@ fn app(log: &'static Log) -> App<Sessions> {
             .public(),
         )
         .route(
-            post("/api", |cx: &mut Cx<'_, Visitor>| {
+            post("/api", |cx: &mut Context<'_, Visitor>| {
                 let n = cx.body()?.len();
-                cx.text(200, &n.to_string());
-                Ok(())
+                cx.text(200, &n.to_string())
             })
             .public(),
         )
         .route(
-            post("/lazy", |cx: &mut Cx<'_, Visitor>| {
+            post("/lazy", |cx: &mut Context<'_, Visitor>| {
                 // Never reads its body: under multipart, the reply must not leave.
                 cx.set_header("set-cookie", "changed=1");
-                cx.text(200, "changed");
-                Ok(())
+                cx.text(200, "changed")
             })
             .public(),
         )
         .route(
-            post("/raw", |cx: &mut Cx<'_, Visitor>| {
+            post("/raw", |cx: &mut Context<'_, Visitor>| {
                 let b = cx.body()?;
-                cx.text(200, &b.len().to_string());
-                Ok(())
+                cx.text(200, &b.len().to_string())
             })
             .public(),
         )
         .route(
-            post("/hook", |cx: &mut Cx<'_, Visitor>| {
-                cx.text(200, "hook");
-                Ok(())
+            post("/hook", |cx: &mut Context<'_, Visitor>| {
+                cx.text(200, "hook")
             })
             .public()
             .csrf_exempt("signed by the sender"),
         )
         .route(
-            get("/away", |cx: &mut Cx<'_, Visitor>| {
+            get("/away", |cx: &mut Context<'_, Visitor>| {
                 let to = cx.query("to")?.unwrap_or_default().into_owned();
                 cx.redirect_external(303, &to)
             })
@@ -129,10 +121,9 @@ fn app(log: &'static Log) -> App<Sessions> {
         )
         .route(
             Route::at("/doc")
-                .put(|cx: &mut Cx<'_, Visitor>| {
+                .put(|cx: &mut Context<'_, Visitor>| {
                     cx.precondition(Some("v2"), None)?;
-                    cx.text(200, "saved");
-                    Ok(())
+                    cx.text(200, "saved")
                 })
                 .public(),
         )
@@ -143,7 +134,7 @@ fn app(log: &'static Log) -> App<Sessions> {
 fn token(app: &App<Sessions>, sid: &str) -> String {
     let r = respond(
         app,
-        format!("GET /token HTTP/1.1\r\nHost: a\r\nCookie: sid={sid}\r\n\r\n").as_bytes(),
+        format!("GET /token HTTP/1.1\r\nHost: localhost\r\nCookie: sid={sid}\r\n\r\n").as_bytes(),
     );
     assert_eq!(r.status, 200);
     r.text().to_owned()
@@ -161,7 +152,7 @@ fn post_to(
         .map(|s| format!("Cookie: sid={s}\r\n"))
         .unwrap_or_default();
     let mut raw = format!(
-        "POST {path} HTTP/1.1\r\nHost: a\r\n{cookie}{extra}Content-Type: {ct}\r\nContent-Length: {}\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\n{cookie}{extra}Content-Type: {ct}\r\nContent-Length: {}\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -174,28 +165,16 @@ const FORM: &str = "application/x-www-form-urlencoded";
 #[test]
 fn test_build_requires_csrf_or_an_exemption() {
     let e = App::builder()
+        .route(post("/a", |cx| cx.text(200, "a")).public())
         .route(
-            post("/a", |cx| {
-                cx.text(200, "a");
-                Ok(())
-            })
-            .public(),
+            post("/b", |cx| cx.text(200, "b"))
+                .public()
+                .csrf_exempt("  "),
         )
         .route(
-            post("/b", |cx| {
-                cx.text(200, "b");
-                Ok(())
-            })
-            .public()
-            .csrf_exempt("  "),
-        )
-        .route(
-            post("/c", |cx| {
-                cx.text(200, "c");
-                Ok(())
-            })
-            .public()
-            .csrf_exempt("a webhook"),
+            post("/c", |cx| cx.text(200, "c"))
+                .public()
+                .csrf_exempt("a webhook"),
         )
         .build()
         .unwrap_err();
@@ -353,7 +332,7 @@ fn test_external_redirects_are_allowlisted() {
     let go = |to: &str| {
         respond(
             &app,
-            format!("GET /away?to={to} HTTP/1.1\r\nHost: a\r\n\r\n").as_bytes(),
+            format!("GET /away?to={to} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
         )
     };
     let r = go("https://accounts.example.com/login");
@@ -381,7 +360,7 @@ fn test_preconditions() {
     let hdr = |extra: &str| format!("X-CSRF-Token: {t}\r\n{extra}");
     let put = |extra: &str| {
         let raw = format!(
-            "PUT /doc HTTP/1.1\r\nHost: a\r\nCookie: sid=s1\r\n{}Content-Length: 0\r\n\r\n",
+            "PUT /doc HTTP/1.1\r\nHost: localhost\r\nCookie: sid=s1\r\n{}Content-Length: 0\r\n\r\n",
             hdr(extra)
         );
         respond(&app, raw.as_bytes())
@@ -411,19 +390,17 @@ fn test_uploads_check_the_token_before_storing() {
     let app = App::with_gate(Sessions)
         .csrf(Csrf::new(KEY).unwrap())
         .route(
-            get("/token", |cx: &mut Cx<'_, Visitor>| {
+            get("/token", |cx: &mut Context<'_, Visitor>| {
                 let t = cx.csrf_token()?;
-                cx.text(200, &t);
-                Ok(())
+                cx.text(200, &t)
             })
             .public(),
         )
         .route(
-            post("/upload", move |cx: &mut Cx<'_, Visitor>| {
+            post("/upload", move |cx: &mut Context<'_, Visitor>| {
                 let up = cx.upload(store)?;
                 let n = up.files("doc").count();
-                cx.text(200, &n.to_string());
-                Ok(())
+                cx.text(200, &n.to_string())
             })
             .public(),
         )

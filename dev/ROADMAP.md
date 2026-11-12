@@ -84,7 +84,13 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - [x] `dev/READINESS-1.0.md` for James.
 - Moved to 0.9.x, with the reason: benchmarks on a quiet machine with the per-step split. The shared machine has not been quiet through any release; the numbers in `docs/PERFORMANCE.md` stay relative until it is.
 
-## v0.9.x - Until 1.0
+## v0.10.0 - Simplified (DONE, 2026-11-11)
+- [x] Simplicity audit of every public item (`dev/SIMPLICITY-0.10.md`): S-1 to S-14 fixed.
+- [x] `App::listen`, writers that return `Result`, `.public()` only where a gate has rules, one way per job, plain names.
+- [x] `docs/API.md` rewritten as a compiled reference; the README compiles too.
+- [x] Migration note (`CHANGELOG.md`, `docs/release/v0.10.0.md`); the dependents told.
+
+## v0.10.x - Until 1.0
 - [ ] A site in production on web-net for two weeks (James).
 - [ ] The gate crates on crates.io, and a test against them here (James: repositories).
 - [ ] Quiet-machine benchmarks.

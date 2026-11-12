@@ -31,6 +31,6 @@ impl serve_net::HttpService for Wrap {
         env: &serve_net::Envelope,
         reply: &mut serve_net::HttpReply,
     ) -> serve_net::Outcome {
-        self.0.respond(request, env, reply)
+        self.0.respond(request, env, None, reply).outcome
     }
 }
