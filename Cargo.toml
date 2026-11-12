@@ -76,7 +76,7 @@ compress-lib = { version = "1.0", default-features = false }
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 # The example site renders with Luminess (first party, zero dependencies).
-luminess = "0.7"
+luminess = "0.9.3"
 
 [[example]]
 name = "site"

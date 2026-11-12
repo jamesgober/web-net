@@ -108,8 +108,19 @@ table below is the whole migration.
 
 - Static files: resolutions are cached per mount (two seconds, one
   metadata call per hit), small files keep their bytes, and large files go
-  out in 256 KiB parts from a reused buffer. Figures in
+  out in 256 KiB parts from a reused buffer. A 10 KB file takes 0.45 of
+  0.9.0's time on Linux (4.8 µs against 10.4 µs) and about a quarter on
+  Windows; a 2 MiB file 0.63 on Linux and a quarter on Windows. Figures in
   `docs/PERFORMANCE.md`.
+
+### Verification
+
+- Both fuzz targets an hour each on the final code (request 4.9 million
+  runs, path 14.8 million), no findings; the path property test at 50,000
+  cases.
+- Request benchmarks against 0.9.0, six alternating rounds per side in one
+  job: no measurable change (medians 0.74 to 1.11 of 0.9.0, serve-net
+  alone 0.99, on a loaded machine).
 
 ### Dependencies
 
