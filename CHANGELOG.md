@@ -13,22 +13,26 @@
 
 ---
 
-## [0.10.0] - 2026-11-11
+## [0.10.0] - 2026-11-12
 
-The simplified API. Every public item was checked against one test: the
-common case in a line or two, names a newcomer reads without the docs, one
-way to do each thing (`dev/SIMPLICITY-0.10.md`). This release breaks the
-0.9 API on purpose; the table below is the whole migration.
+The simplified API, and the fixes from an independent review of 0.9.0.
+Every public item was checked against one test: the common case in a line
+or two, names a newcomer reads without the docs, one way to do each thing
+(`dev/SIMPLICITY-0.10.md`). This release breaks the 0.9 API on purpose; the
+table below is the whole migration.
 
 ### Changed (breaking)
 
 | 0.9 | 0.10 |
 |---|---|
 | `serve_net::Server::builder().listener(ListenerSpec::tcp("web", addr)).serve(app)?` | `app.listen(addr)?` (the builder still works for TLS and other limits) |
+| A site with no `.host(..)` answered every `Host` | it answers the development hosts only; add `.host("example.com")` before deploying, or `.any_host()` |
+| `Cx` | `Context` |
 | `cx.html(200, s); Ok(())` | `cx.html(200, s)` (also `text`); in the middle of a handler, `cx.html(200, s)?;` |
 | `cx.set_header("content-type", t); cx.body_bytes(b); Ok(())` | `cx.bytes(200, t, b)` |
 | `get(..).public()` with `App::builder()` (the `Open` gate) | `get(..)`; `.public()` still compiles and still declares |
 | `cx.param("x").unwrap_or_default()` | `cx.param("x")?` |
+| `cx.url(path)` | `cx.url(path)?` (refuses a target that is not a site path); `cx.url_path(&[..])` for segments from input |
 | `cx.see_other(path)` | `cx.redirect(303, path)` |
 | `cx.media(offers)`, `cx.language(offers)` | `cx.accept(offers)`, `cx.accept_language(offers)` |
 | `cx.body_mut()` | `cx.reply_buffer()` |
@@ -36,46 +40,98 @@ way to do each thing (`dev/SIMPLICITY-0.10.md`). This release breaks the
 | `app.respond(req, env, reply)` | `app.respond(req, env, None, reply).outcome`, or the `HttpService::call` it already had |
 | `app.respond_identified(req, env, who, reply)` | `app.respond(req, env, Some(who), reply).outcome` |
 | `app.serve(req, env, who, reply)`, `sites.serve(..)` | `app.respond(req, env, who, reply)`, `sites.respond(..)` |
+| A wrapper that calls the app | also forwards serve-net's `done`: `HttpService::done(&app, env, finished)` |
+| A route's `.allow(r)` inside a group with `.allow(g)` replaced `g` | both hold; a `.public()` route inside a group with a rule stops the build (move it out of the group) |
 | `Denial::status(429, code)`, `denial.status_code()` | `Denial::with_status(429, code)`, `denial.status()` |
 | `Builder::challenge(v)` | `Builder::www_authenticate(v)` |
 | `Group::new(prefix)` | `Group::at(prefix)` |
+| `web_net::csrf_sec::OsPads` (csrf-sec 0.9) | `web_net::csrf_sec::OsRandom` (csrf-sec 0.10); `cookie_net` is 0.8, `form_net` 0.10 |
+| A reference shown as `1a-2` | 16 hexadecimal digits; `RequestId::connection()` and `seq()` keep the raw values |
+
+### Fixed
+
+- A large file sent in parts was forgotten once 256 later large-file
+  replies had started on its worker, and its next part restarted from byte
+  0: the download ended cleanly with one block of wrong bytes. A reply in
+  parts now keeps its record to its last part (or until serve-net says the
+  request is done) and is never forgotten; past 16,384 at once a new one is
+  refused with 503. Each part reopens the file found for the first and
+  checks it has not changed.
+- A panic in the gate, a checkpoint, a readiness check, an event sink, or
+  the error template reset the connection with no reply and no event. Each
+  is now caught, answered with the built-in 500 page, and reported as
+  `Panicked`; a failing event sink loses its event, never the reply.
+- The 405 and automatic `OPTIONS` answers revealed routes the gate hides.
+  They now go only to someone who may use one of the route's methods; a
+  hidden route reads as missing for every method.
+- With no host declared, any `Host` was the site (DNS rebinding). Now only
+  the development hosts are; `any_host()` answers every host.
+- With `lowercase_paths`, an upper-case route literal built and could never
+  match. It is a build problem now.
+- `Context::url` accepted `//evil.example`, a link to another host. It now
+  refuses any target that is not a path of the site.
+- Compression dropped `accept-encoding` from a handler's own `Vary`, so a
+  cache could hand gzip to a client that did not accept it.
+- A checkpoint's `Deny { status: 200 }` answered a revoked visitor with a
+  success status. A status outside 400 to 599 is answered as 403.
+- A route's own rule replaced its group's: narrowing one admin route opened
+  it to everyone the narrower rule allowed. Both now hold.
+- A path that decodes to a C1 control character (U+0080 to U+009F, such as
+  `%C2%85`, NEL) is refused with 400 `url.control`, as C0 controls and DEL
+  always were. Found by the path property test.
+- `Request::cookie` refused any request with two `Cookie` fields, which
+  HTTP/2 and HTTP/3 send as a matter of course (cookie crumbs). Several
+  fields are now read as one header; a name in two of them is still
+  refused, as is a name twice in one.
 
 ### Added
 
 - `App::listen(addr)` and `Sites::listen(addr)`: serve on an address with
   serve-net's defaults, no other dependency.
-- `Cx::bytes(status, content_type, body)`.
+- `Builder::any_host()`.
+- `Context::bytes(status, content_type, body)`.
+- `Context::url_path(&["tags", tag])`: a link from segments, each encoded.
+- `escape_html(text)`, for a handler that writes HTML itself.
 - `ErrorPage::base` and `ErrorPage::url(path)`: an error page of a site
-  installed in a folder (`/blog`) links its stylesheet and home inside the
-  folder. `ErrorPage::with_base` for an engine's tests. `ErrorPage::new` is
+  installed in a folder links its stylesheet and home inside the folder.
+  `ErrorPage::with_base` for an engine's tests. `ErrorPage::new` is
   unchanged.
 - `Denial::unavailable(code)`: a 503 for a gate that cannot decide now (its
   stores are down) and fails closed, so clients and load balancers retry
   instead of reading "forbidden". `Denial::retry_after(seconds)` adds
   `Retry-After` to a 429 or 503. `DenialKind::Unavailable`.
+- `HttpService::done` for `App` and `Sites`.
 - `Events` and `Checkpoint` for `Arc<T>`, so an application can keep a
   handle to its sink or its lockdown switch.
 
-### Fixed
+### Performance
 
-- A path that decodes to a C1 control character (U+0080 to U+009F, such as
-  `%C2%85`, NEL) is refused with 400 `url.control`, as C0 controls and DEL
-  always were. Found by the path property test.
+- Static files: resolutions are cached per mount (two seconds, one
+  metadata call per hit), small files keep their bytes, and large files go
+  out in 256 KiB parts from a reused buffer. Figures in
+  `docs/PERFORMANCE.md`.
+
+### Dependencies
+
+- cookie-net 0.8, form-net 0.10, csrf-sec 0.10 (all re-exported, so their
+  own changes reach applications that use them through web-net; csrf-sec's
+  `OsPads` is `OsRandom`), compress-lib 1.0, parse-net 0.9.3.
+- The README now says what the tree holds: no third-party crate of
+  web-net's own; crypt-io brings blake3, subtle, zeroize, and the crates
+  beneath them.
 
 ### Documentation
 
 - `docs/API.md` rewritten as a task-oriented reference with every public
-  item; it and the README compile and run as doctests.
+  item; it and the README compile and run as doctests. Every public item
+  has a runnable example of its own.
 - `dev/SIMPLICITY-0.10.md`: the audit, each finding, and what was kept with
   its reason.
-
-### Verification
-
-- Both fuzz targets an hour each on this code; the path property test at
-  50,000 cases.
-- Benchmarks against 0.9.0, six alternating rounds per side in one job: no
-  measurable change (medians 0.74 to 1.11 of 0.9.0 across the request
-  benchmarks, serve-net alone 0.99, on a loaded machine).
+- `docs/SECURITY.md`: the review's findings; catching panics needs
+  `panic = "unwind"`.
+- The error reference is a keyed hash: it shows no connection counter.
+- The crate's own release profile unwinds (it aborted), so its examples
+  isolate panics as a site would.
 
 ### Unchanged
 
@@ -83,8 +139,6 @@ way to do each thing (`dev/SIMPLICITY-0.10.md`). This release breaks the
   only gained `base` and `url`.
 - `Gate` and `Identity`; `Denial::sign_in`, `forbidden`, `hidden`,
   `with_cookie`.
-- Every security rule: with a gate that has rules, a route that declares no
-  access still stops the build.
 
 ---
 

@@ -16,7 +16,7 @@ cargo bench --bench web
 
 `tests/alloc.rs` counts allocations with a global allocator over 80 warm requests on one connection, through a bare serve-net handler and through web-net (host matched case-insensitively, a base path, a parameter route, `Accept` and `Accept-Encoding` sent). Result: **0.00 allocations per request on both**. web-net's warm request path allocates nothing: host checks compare without lower-case copies, `Cache-Control` values are made at build, the reply buffers are reused per thread, and parameters are byte ranges into the path.
 
-Paths that do allocate, all off the common path: a non-canonical path (the canonical string for its redirect), an error reply (its page and reference), CSRF on unsafe methods (the request's own origin, and the urlencoded form parsed for its token), compression (the compressed body), rendering through `Cx::render_named` (whatever the engine does).
+Paths that do allocate, all off the common path: a non-canonical path (the canonical string for its redirect), an error reply (its page and reference), CSRF on unsafe methods (the request's own origin, and the urlencoded form parsed for its token), compression (the compressed body), rendering through `Context::render_named` (whatever the engine does).
 
 ## Numbers
 

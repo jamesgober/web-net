@@ -11,6 +11,16 @@ use std::borrow::Cow;
 use std::fmt;
 
 /// What a request path was refused for (answered with 400).
+///
+/// ```
+/// use web_net::{App, UrlError, get};
+///
+/// let app = App::builder().route(get("/", |cx| cx.text(200, "ok"))).build()?;
+/// let r = serve_net::testing::respond(&app, b"GET /a%2Fb HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.status, 400);
+/// assert_eq!(UrlError::EncodedSlash.code(), "url.encoded_slash");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UrlError {
@@ -32,6 +42,13 @@ pub enum UrlError {
 
 impl UrlError {
     /// A stable code for logs and events.
+    ///
+    /// ```
+    /// use web_net::UrlError;
+    ///
+    /// assert_eq!(UrlError::BadEscape.code(), "url.bad_escape");
+    /// assert_eq!(UrlError::NotUtf8.code(), "url.not_utf8");
+    /// ```
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
@@ -65,6 +82,20 @@ impl std::error::Error for UrlError {}
 
 /// What a site does with a trailing slash. One policy per site, so a page has
 /// one address.
+///
+/// ```
+/// use web_net::{App, TrailingSlash, get};
+///
+/// let strict = App::builder().route(get("/about", |cx| cx.text(200, "about"))).build()?;
+/// let loose = App::builder()
+///     .trailing_slash(TrailingSlash::Ignore)
+///     .route(get("/about", |cx| cx.text(200, "about")))
+///     .build()?;
+/// let req = b"GET /about/ HTTP/1.1\r\nHost: localhost\r\n\r\n";
+/// assert_eq!(serve_net::testing::respond(&strict, req).header("location"), Some(&b"/about"[..]));
+/// assert_eq!(serve_net::testing::respond(&loose, req).text(), "about");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrailingSlash {

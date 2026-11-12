@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .development()
         .base("/app")
         .route(get("/", |cx| {
-            let users = cx.url("/users/7");
+            let users = cx.url("/users/7")?;
             cx.html(
                 200,
                 &format!("<h1>Hello</h1><a href=\"{users}\">user 7</a>"),

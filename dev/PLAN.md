@@ -73,7 +73,7 @@ One fixed path. Each step answers or hands on; nothing runs that the request doe
 | 11 | hooks `Finish` | the hook's error | add headers |
 | 12 | finish | 500 for an invalid field | the reply is copied to serve-net; `x-content-type-options: nosniff` and the security headers, except fields the handler set |
 
-The cache fast path for guests sits in front of web-net: `App::respond` reports whether a reply may be kept (section 12.4). The handler's own conditional fast path is `Cx::not_modified` (0.3).
+The cache fast path for guests sits in front of web-net: `App::respond` reports whether a reply may be kept (section 12.4). The handler's own conditional fast path is `Context::not_modified` (0.3).
 
 Why authentication runs before routing: a ban, an expired session, or a forged token is caught before any route code or route lookup, and the router never needs to know about credentials. The cost is one gate call for requests that end in 404; a gate keeps that cheap (an in-memory session lookup).
 
@@ -88,7 +88,7 @@ Why authentication runs before routing: a ban, an expired session, or a forged t
 | unknown host | 421 when hosts are declared (an empty or missing `Host` included); with none declared the site answers any host | a site never serves a host it does not own |
 | development | `localhost`, `127.0.0.1`, `[::1]`, `*.localhost` are the site only on a builder marked `development()`; HTTPS is not required for them | production never trusts "localhost" in a `Host` field |
 | HTTPS | `https_only()` redirects plain HTTP to `https://` on the canonical host; it needs a declared host, so a redirect is never built from the request's `Host` | no host-header poisoning through redirects |
-| base path | `/blog`: removed before routing, added back by `Cx::url` and every redirect; `/blog` itself is redirected to `/blog/`; paths outside get 404 | the site works installed in a folder and moves without editing routes |
+| base path | `/blog`: removed before routing, added back by `Context::url` and every redirect; `/blog` itself is redirected to `/blog/`; paths outside get 404 | the site works installed in a folder and moves without editing routes |
 | decoding | percent-escapes decoded once; the decoded bytes must be UTF-8; `%2F` (encoded slash), `%5C` and a raw `\`, and any control character (C0, DEL, and C1: U+0080 to U+009F) are refused with 400 | double decoding and encoded separators are classic routing and traversal bypasses |
 | canonical form | each decoded segment re-encoded one way: RFC 3986 `pchar` bytes (unreserved, sub-delims, `:`, `@`) written as they are, every other byte as upper-case `%XX` | each path has exactly one spelling, so route literals compare byte for byte |
 | dot segments | `.` and `..` removed after decoding (`%2e%2e` is `..`), never above the root | `..` can never escape a folder |
@@ -96,7 +96,7 @@ Why authentication runs before routing: a ban, an expired session, or a forged t
 | trailing slash | one policy per site: `Strip` (default), `Add` (a last segment with a dot loses its slash instead), `Ignore` | one URL per page, unless the site says otherwise |
 | case | `lowercase_paths()` redirects paths with upper-case letters | for sites that promise lower-case URLs |
 | redirect | any path not in canonical form is redirected to it, query kept: 301 for `GET` and `HEAD`, 308 otherwise | users and search engines see one address; a POST keeps its method and body |
-| query | read on demand by `Cx::query`: `+` is a space, escapes decoded; a name that appears twice is a 400 | most pages never read the query; parameter pollution is refused, never resolved |
+| query | read on demand by `Context::query`: `+` is a space, escapes decoded; a name that appears twice is a 400 | most pages never read the query; parameter pollution is refused, never resolved |
 
 The fast path: a path with no `%`, no empty segment, no dot segment (and no upper case when the site is lower case) is canonical as it is, and is routed without allocating.
 
@@ -131,7 +131,7 @@ pub trait Gate: Send + Sync + 'static {
 - One trait with two checkpoints, so an application has one type parameter (`App<G>`). An implementation joins its authentication and authorization crates; web-net names neither.
 - `Open` is the default gate: every visitor is a `Guest`, and its rule type (`NoRule`) has no values, so only public routes can be declared.
 - With a gate that has rules, every route declares `.public()` or `.allow(rule)`; groups give a default. A route with neither stops the build (D-002 kept). With a gate whose rule type is `NoRule`, every route is public and declares nothing (D-061).
-- A handler receives a `Cx`, which only web-net can make, and only after the access check passed. Skipping the gate does not compile.
+- A handler receives a `Context`, which only web-net can make, and only after the access check passed. Skipping the gate does not compile.
 - `Denial::{sign_in, forbidden, hidden, unavailable}(code)` and `Denial::with_status(status, code)`; `unavailable` is the 503 of a gate that cannot decide now, with `retry_after(seconds)` for `Retry-After`. `sign_in` on a `GET` or `HEAD` with a sign-in page configured is a 303 to it with `next` (the site-relative path and query, percent-encoded); otherwise 401 with the configured `WWW-Authenticate` value (`Builder::www_authenticate`, default `Session`). `with_status` accepts 4xx only; anything else becomes 403, so a gate cannot turn a denial into a success.
 - `Request::cookie(name)` reads through cookie-net and refuses ambiguity: a name twice, or two `Cookie` fields, is `Err(Ambiguous)`, never a pick.
 - `App::respond` with `Some(identity)` is for a caller that authenticated already; web-net trusts the identity it is given and still authorizes every route that is not public.
@@ -141,10 +141,10 @@ pub trait Gate: Send + Sync + 'static {
 
 ## 7. Handlers and the context
 
-- A handler is `Fn(&mut Cx<'_, I>) -> web_net::Result` (or any `Handler<I>`). Synchronous: serve-net's workers run it; a route declares `.work(WorkClass::Io | Cpu)` so a dispatcher in front can move slow work off the connection's worker (`App::classify`).
-- `Cx` reads: method, canonical path, fields, identity, reference, parameters (`param` with 500 for a name the pattern lacks, `param_as` with 404 on a value that does not parse), query, body.
-- `Cx` replies: `html`, `text`, `bytes`, `redirect`, and `render` each write a whole reply and return `Result`, so a handler ends with one (D-062).
-- `Cx` writes into a reply web-net holds (status, fields, body), copied to serve-net only when the handler and its hooks succeed. An error or a panic discards it whole: a cookie or header set before the failure never leaves.
+- A handler is `Fn(&mut Context<'_, I>) -> web_net::Result` (or any `Handler<I>`). Synchronous: serve-net's workers run it; a route declares `.work(WorkClass::Io | Cpu)` so a dispatcher in front can move slow work off the connection's worker (`App::classify`).
+- `Context` reads: method, canonical path, fields, identity, reference, parameters (`param` with 500 for a name the pattern lacks, `param_as` with 404 on a value that does not parse), query, body.
+- `Context` replies: `html`, `text`, `bytes`, `redirect`, and `render` each write a whole reply and return `Result`, so a handler ends with one (D-062).
+- `Context` writes into a reply web-net holds (status, fields, body), copied to serve-net only when the handler and its hooks succeed. An error or a panic discards it whole: a cookie or header set before the failure never leaves.
 - Fields are checked as they are set: a name that is not a token, a value with a control character, or a framing field (`content-length`, `transfer-encoding`, `connection`, `keep-alive`, `upgrade`) turns the reply into a 500.
 - Redirects from handlers (`redirect(status, path)`) take site-relative paths only: one leading `/`, never `//` or `/\`, visible ASCII. The base path is added. Redirects to other hosts come later, through an allowlist (0.4).
 - The reply buffers are reused per thread between requests (taken for one request and put back, so nothing about a request stays there). `wipe_buffers()` zeroes them after every request.
@@ -185,11 +185,11 @@ pub trait View {
 ```
 
 - Two kinds of engine, one trait (D-058). A **typed** engine compiles its templates at boot against the application's own types (`type View<'a> = Page<'a>`) and reads them directly: a misspelled field is a boot error, not an empty string. A **dynamic** engine reads any value through web-net's `View` (`type View<'a> = dyn View + 'a`): the shape for adapters to third-party engines. The view type is generic over a lifetime, so views may borrow what the handler has.
-- `App`, `Builder`, `Cx`, `Route`, `Group`, and `Sites` are generic over the engine, `E = NoRender` by default. `Builder::render(engine)` sets it, before any route or hook (they are typed by the engine; one added before is a build error). Static dispatch: no engine call goes through a vtable.
+- `App`, `Builder`, `Context`, `Route`, `Group`, and `Sites` are generic over the engine, `E = NoRender` by default. `Builder::render(engine)` sets it, before any route or hook (they are typed by the engine; one added before is a build error). Static dispatch: no engine call goes through a vtable.
 - Handlers: `cx.render(&view)` with the engine's view type; `cx.render_view(&dyn View)` for a dynamic engine (so a `Fields` or any view coerces).
 - No JSON between data and engine (D-007). Building a text document from typed data and parsing it back costs tens of microseconds per page [est.] and loses every type. An engine resolves the names a template uses to `Key`s once (through the view's `Shape`, cached per `ShapeId`) and reads values by key while rendering.
 - `Value`: absent, bool, int, float, text, trusted HTML (`SafeHtml::trusted`, greppable), a computed `Display`, a nested view, a list. `call` passes its result to a closure, so a method can return a value computed for the call.
-- Templates a route names (`.template("post")`) are resolved at build; an unknown one stops the build. `Cx::render(&view)` renders the route's template; `render_named` resolves per call.
+- Templates a route names (`.template("post")`) are resolved at build; an unknown one stops the build. `Context::render(&view)` renders the route's template; `render_named` resolves per call.
 - `Output` writes into the reply body with a page budget (default 8 MiB, `page_limit`); `Output::buffer` hands an engine the `Vec<u8>` itself, and the budget is checked when it returns.
 - Error pages: `Render::error_page(&ErrorPage { status, title, message, reference })`; `Ok(false)` (the default) or an error leaves web-net's built-in page.
 - Escaping for each output context is the engine's job, with raw output behind an explicit marker. This is where cross-site scripting is prevented.
@@ -221,19 +221,19 @@ pub trait View {
 | static files | 0.3 (done) | section 12.1 |
 | health | 0.3 (done) | `health(path)`: `200 ok`; `ready(path, check)`: `200 ready` or `503 not ready`; `GET`/`HEAD` only, `no-store`, before the gate |
 | security headers | 0.3 (done) | section 12.2 |
-| cookies out | 0.3 (done) | `Cx::set_cookie(&SetCookie)`; cookie-net is re-exported as `web_net::cookie_net` so the versions match |
-| conditional fast path | 0.3 (done) | `Cx::not_modified(tag)` sets `ETag` and answers 304 when `If-None-Match` matches (weak comparison, `GET`/`HEAD`) |
+| cookies out | 0.3 (done) | `Context::set_cookie(&SetCookie)`; cookie-net is re-exported as `web_net::cookie_net` so the versions match |
+| conditional fast path | 0.3 (done) | `Context::not_modified(tag)` sets `ETag` and answers 304 when `If-None-Match` matches (weak comparison, `GET`/`HEAD`) |
 | forms and uploads | 0.4 (done) | section 12.3 |
 | CSRF | 0.4 (done) | section 12.3 |
 | actions | 0.4 (done) | the accepted form answers 303 (`redirect(303, ..)`), the refused one renders again with 422 from the `FormError` the handler got |
-| external redirects | 0.4 (done) | `Builder::redirect_hosts` and `Cx::redirect_external`: `https://` or `http://`, a listed host, no user information, visible ASCII |
-| preconditions | 0.4 (done) | `Cx::precondition(tag, modified)`: `If-Match` (strong) and `If-Unmodified-Since` answer 412 before an unsafe request changes anything |
-| negotiation | 0.5 (done) | error replies in JSON when `Accept` prefers `application/json` to `text/html` (same facts as the page); `Cx::accept_language(offers)` and `Cx::accept(offers)` |
+| external redirects | 0.4 (done) | `Builder::redirect_hosts` and `Context::redirect_external`: `https://` or `http://`, a listed host, no user information, visible ASCII |
+| preconditions | 0.4 (done) | `Context::precondition(tag, modified)`: `If-Match` (strong) and `If-Unmodified-Since` answer 412 before an unsafe request changes anything |
+| negotiation | 0.5 (done) | error replies in JSON when `Accept` prefers `application/json` to `text/html` (same facts as the page); `Context::accept_language(offers)` and `Context::accept(offers)` |
 | CORS | 0.5 (done) | section 12.5 |
 | compression | 0.5 (done) | `Builder::compress(Compression)`: gzip through compress-lib for compressible types over a minimum size (1 KiB), only when the client accepts gzip and only when it is smaller; `Vary: accept-encoding` on every compressible reply once enabled. Off by default (a proxy usually compresses). Brotli for dynamic replies waits for an encoder in compress-lib; static files have precompressed `.br` |
 | caching | 0.5 (done) | section 12.4 |
 | several sites | 0.5 (done) | `Sites`: the application that lists the request's host (or an alias) beats one that answers any host; then the longest base path holding the path; otherwise the first added answers by its own rules (421, 404) |
-| before-render hook | 0.5 (done) | `Hook::BeforeRender`, inside `Cx::render` before the engine; a hook that renders does not run the hooks again |
+| before-render hook | 0.5 (done) | `Hook::BeforeRender`, inside `Context::render` before the engine; a hook that renders does not run the hooks again |
 
 ### 12.1 Static files
 
@@ -241,7 +241,8 @@ pub trait View {
 - The path is canonical already (section 4). Each decoded segment is checked again for what file systems read specially, on every platform so a site behaves the same everywhere: a leading dot (`.env`, `.git`; `hidden_files(true)` allows them), `:` (Windows alternate data streams and drive letters), a trailing dot or space (Windows drops them, so `secret.txt.` would open `secret.txt`), `\`, NUL, and the Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, with any extension). Any of them is a 404.
 - The joined path is resolved (`canonicalize`) and must still be under the resolved root, so a symbolic link cannot lead out of the folder, and every resolved name below the root passes the same segment rules: a Windows 8.3 short name (`ENVSEC~1` for `.envsecret`) or a link inside the folder cannot reach a name the request could not spell. Links that stay inside work. The window between the check and the open is only reachable by someone who can write into the folder.
 - The file is read (or, for a large one, opened) before any field is written; one that cannot be read is a clean 500.
-- A large reply in parts remembers its file's entity tag (per worker thread, keyed by connection and request number, at most 256 at once; a reply in parts never leaves its worker). A later part whose file changed or went away ends the connection abortively, so the client sees a cut-short body, never a clean end with other bytes.
+- A large reply in parts keeps a record per application (keyed by connection and request number) from its first part to its last, or until serve-net reports the request done; a record is never evicted, and past 16,384 at once a new large reply is refused with 503 and `Retry-After` (D-072). Every part reopens the file resolved for the first part and checks its length and modification time; a change, or a short read, ends the connection abortively, so the client sees a cut-short body, never a clean end with other bytes.
+- Resolutions are cached per mount for two seconds, checked on each hit with one metadata call that does not follow links; files up to 64 KiB keep their bytes (32 MiB per mount), used while the length and modification time hold (D-074).
 - A folder is a 404 unless the mount has an `index` file. There are never listings.
 - Validators: a strong `ETag` from the length, the modification time (nanoseconds), and the coding; `Last-Modified`. `If-None-Match` (weak comparison) answers 304; without it, `If-Modified-Since` does. Malformed conditions are ignored, as RFC 9110 says.
 - Ranges (`GET` only): one range is a 206 with `Content-Range`; an unsatisfiable one a 416 with `bytes */length`; several ranges, or an `If-Range` that does not match, get the whole file (RFC 9110 lets a server ignore `Range`). `Accept-Ranges: bytes`.
@@ -270,8 +271,8 @@ Cost: about 400 bytes per reply and one comparison per field against the handler
 
 Forms go through form-net (re-exported as `web_net::form_net`, so its `form!` macro needs no other dependency):
 
-- `Cx::form::<T>()` reads a urlencoded or multipart body into a typed form with the route's `form_limits` (default `form_net::Limits::DEFAULT`); `form_inspected` adds an inspector (a content policy that sees every part and field first). The error is form-net's `FormError`, so an action can render the form again with 422; `?` turns it into an `Error` with its status (400, 413, 415, 422, or 403 for a token).
-- `Cx::upload(&Store)` (feature `uploads`) reads a multipart upload: text in memory, files in the store's private temporary files.
+- `Context::form::<T>()` reads a urlencoded or multipart body into a typed form with the route's `form_limits` (default `form_net::Limits::DEFAULT`); `form_inspected` adds an inspector (a content policy that sees every part and field first). The error is form-net's `FormError`, so an action can render the form again with 422; `?` turns it into an `Error` with its status (400, 413, 415, 422, or 403 for a token).
+- `Context::upload(&Store)` (feature `uploads`) reads a multipart upload: text in memory, files in the store's private temporary files.
 - A form posted with a token lists `csrf_token` in its `ignore` list.
 
 Every unsafe method (`POST`, `PUT`, `PATCH`, `DELETE`) on a route that is not exempt passes the CSRF step after authorization and before any hook or handler. An application with such a route and no `Builder::csrf(Csrf)` does not build; `Route::csrf_exempt(reason)` takes a route out, and an empty reason stops the build.
@@ -285,7 +286,7 @@ Every unsafe method (`POST`, `PUT`, `PATCH`, `DELETE`) on a route that is not ex
 
 (0.4 checked a multipart token in the pass that read the form and replaced the reply when the handler never read it. An independent review in 0.7 showed the handler's side effects could happen first; the token is now checked before the handler for every encoding, D-046.)
 
-`Cx::csrf_token()` issues a token for the visitor's binding, masked differently on every call.
+`Context::csrf_token()` issues a token for the visitor's binding, masked differently on every call.
 
 Cost [est., csrf-sec's own measurements]: about 110 ns to verify a token and about 1 ns for the policy; a urlencoded form is parsed once more for its token (the same parser, bounded by the route's limits).
 
@@ -322,7 +323,7 @@ A reply that sets a cookie (the handler's, or the gate's through `Identity::set_
 |---|---|---|
 | path tricks bypassing route rules | one normalization before routing; canonical redirect; encoded slash, backslash, controls refused | 0.2 |
 | `..` escaping a folder | dot segments removed after decoding, never above the root | 0.2 |
-| forgotten authorization | access declared on every route or the build fails; `Cx` only after the gate | 0.2 |
+| forgotten authorization | access declared on every route or the build fails; `Context` only after the gate | 0.2 |
 | host-header poisoning | unknown hosts 421; redirects use declared hosts only | 0.2 |
 | open redirects | handler redirects site-relative only (`//` and `/\` refused); other hosts only from an allowlist, user information refused | 0.2; 0.4 (done) |
 | information leaks in errors | generic pages and a reference; codes and sources only to events | 0.2 |
@@ -361,7 +362,7 @@ src/
   router.rs    pattern parsing, the segment trie, captures
   gate.rs      Identity, Gate, Denial, Open, Guest
   request.rs   Request (what gates and handlers read), RequestId, cookie reading
-  cx.rs        Cx (the handler context), the held reply, query decoding
+  cx.rs        Context (the handler context), the held reply, query decoding
   route.rs     Route, Group, Handler, get/post/put/patch/delete
   render.rs    Render, View, Shape, Value, List, SafeHtml, Fields, Output, RenderError
   events.rs    Events, Event, Checkpoint, Stage
@@ -425,7 +426,8 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | O-5 | Redirect status for a non-canonical `GET`: 301 or 308 | 301 (universally cached and understood); 308 for unsafe methods |
 | O-8 | Request bodies streamed by serve-net (`BodyPolicy::Stream`) | not supported: web-net reads the body once, buffered (serve-net's default), for CSRF and forms; a route that needs streaming uploads is a 1.x addition |
 | O-7 | Ask serve-net for an explicit abort of a reply in parts (today web-net returns `Deferred` without deferring, which serve-net answers with an abortive close once the head has left) | yes, for serve-net 0.8 or 0.9 |
-| O-6 | Should 405 and automatic `OPTIONS` answer before authorization (revealing a route's methods to anyone)? | yes, as now: CORS preflights carry no credentials, and the methods of a route are not a secret; a route that must stay hidden uses `Denial::hidden` and its own `OPTIONS` |
+| O-6 | Should 405 and automatic `OPTIONS` answer before authorization (revealing a route's methods to anyone)? | answered at 0.10 (D-075): no. They go only to someone who may use one of the route's methods; CORS preflights, which carry no credentials, still answer before the gate |
+| O-9 | Ask serve-net for a reply in parts with a declared length, so a large file carries `Content-Length` (GET and HEAD; today both are chunked, and an HTTP/1.0 client cannot tell a cut-short body from a whole one) | yes, for serve-net 0.8 or 0.9; web-net cannot set the field itself (serve-net treats a service's `content-length` as a framing field) |
 
 ---
 
@@ -441,7 +443,7 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-006 | 2026-11-08 | Hooks per route replace middleware | a route with no hooks pays nothing; no chain every request walks |
 | D-007 | 2026-11-08 | Rendering reads typed views by key; no JSON | no serialize-and-parse per page, no lost types |
 | D-008 | 2026-11-08 | One `Gate` trait with `authenticate` and `authorize`; `App<G>` has one type parameter; `Open` is the default | the simplest generic shape; an implementation can join two crates behind it |
-| D-009 | 2026-11-08 | `Cx` is the proof of a cleared request: only web-net constructs it, after the access check | skipping the gate does not compile |
+| D-009 | 2026-11-08 | `Context` is the proof of a cleared request: only web-net constructs it, after the access check | skipping the gate does not compile |
 | D-010 | 2026-11-08 | `respond_identified` for callers that authenticate before the web layer | a front layer authenticates once for every service; web-net still authorizes per route |
 | D-011 | 2026-11-08 | Non-canonical paths are redirected, not routed; routing only ever sees canonical paths | two spellings cannot reach different routes, and literals compare byte for byte |
 | D-012 | 2026-11-08 | Every refusal, denial, failure, and panic is an event | detection must see probes, not only failures |
@@ -460,13 +462,13 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-025 | 2026-11-08 | Precompressed variants only when the client sent `Accept-Encoding`; each variant has its own `ETag`; `Vary` always on such mounts | caches never mix codings; clients that send no field get the plain file |
 | D-026 | 2026-11-08 | Files over 1 MiB go out in 64 KiB parts, each read at serve-net's sent offset | no per-reply state and bounded memory per connection |
 | D-027 | 2026-11-08 | One range per request; several ranges get the whole file | multipart byte ranges are rare and a known amplification vector; RFC 9110 allows ignoring `Range` |
-| D-028 | 2026-11-08 | cookie-net is re-exported for `Cx::set_cookie` | the caller's `SetCookie` is always the version web-net encodes |
+| D-028 | 2026-11-08 | cookie-net is re-exported for `Context::set_cookie` | the caller's `SetCookie` is always the version web-net encodes |
 | D-029 | 2026-11-08 | Every unsafe method needs CSRF unless the route is exempt with a reason; the build fails without an engine | nothing is unprotected by omission (D-002 for CSRF) |
 | D-030 | 2026-11-08 | Urlencoded tokens are checked before the handler; multipart tokens in the form pass, with the raw body locked and an unread form turning the reply into 403 | the token is always checked before the request's data is used, without parsing an upload twice |
 | D-031 | 2026-11-08 | No binding, no unsafe request | a guest's forms need a pre-session id from the gate; refusing is the only safe answer without one |
-| D-032 | 2026-11-08 | `Cx::form` returns form-net's error; `?` maps it to its status | an action renders the form again with the details; a careless handler still answers correctly |
+| D-032 | 2026-11-08 | `Context::form` returns form-net's error; `?` maps it to its status | an action renders the form again with the details; a careless handler still answers correctly |
 | D-033 | 2026-11-08 | External redirects only to allowlisted hosts, never with user information | open redirects stay impossible |
-| D-034 | 2026-11-08 | Preconditions (`If-Match`, `If-Unmodified-Since`) are checked by the handler through `Cx::precondition` | only the handler knows the current version of what it changes |
+| D-034 | 2026-11-08 | Preconditions (`If-Match`, `If-Unmodified-Since`) are checked by the handler through `Context::precondition` | only the handler knows the current version of what it changes |
 | D-035 | 2026-11-08 | form-net and csrf-sec are re-exported | one version of each in an application, and `form!` works through `web_net::form_net` |
 | D-036 | 2026-11-08 | Error replies are JSON when the client prefers it | API clients get the same facts in a form they read; still no detail |
 | D-037 | 2026-11-08 | CORS is declared per route or group, preflights are answered before the gate, and nothing without a policy answers with CORS fields | relaxing the same-origin rule is a decision per route, never a default |
@@ -478,21 +480,35 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-043 | 2026-11-08 | `Accept` is parsed only when it names JSON | most requests never ask for JSON; the error-reply choice should cost them nothing |
 | D-044 | 2026-11-08 | `OPTIONS *` meets the host check like any request | a host the site does not serve learns nothing from it |
 | D-061 | 2026-11-11 | A gate whose `Rule` is `NoRule` (the `Open` gate) needs no `.public()`: undeclared routes are public | with no rule values, public is the only access a route can have; writing it on every route of a site with no sign-in was noise. Gates with rules keep D-002 |
-| D-062 | 2026-11-11 | `Cx::html`, `text`, and the new `bytes(status, type, body)` return `Result`; `body_bytes` is removed | a handler that writes one reply is one expression, without `; Ok(())` |
-| D-063 | 2026-11-11 | `Cx::param` returns `Result` (500 `route.no_param` for a name the pattern lacks) | the matched pattern always has its parameters; `Option` made handlers write `unwrap_or_default` |
+| D-062 | 2026-11-11 | `Context::html`, `text`, and the new `bytes(status, type, body)` return `Result`; `body_bytes` is removed | a handler that writes one reply is one expression, without `; Ok(())` |
+| D-063 | 2026-11-11 | `Context::param` returns `Result` (500 `route.no_param` for a name the pattern lacks) | the matched pattern always has its parameters; `Option` made handlers write `unwrap_or_default` |
 | D-064 | 2026-11-11 | One way per job: `see_other` and `App::with(gate, engine)` removed; `App::respond(req, env, who, reply) -> Served` replaces `respond`, `respond_identified`, and `serve`; `Sites::serve` is `Sites::respond` | the simplicity audit; `redirect(303, ..)`, `with_gate(..).render(..)`, and one answer method cover each |
-| D-065 | 2026-11-11 | Names say what they touch: `Cx::accept` and `accept_language` (were `media`, `language`), `reply_buffer` (was `body_mut`), `Builder::www_authenticate` (was `challenge`), `Denial::with_status` and `status()` (were `status` and `status_code()`), `Group::at` (was `new`) | a newcomer reads them without the docs; `status` meant a constructor on `Denial` and a getter on `Error` |
+| D-065 | 2026-11-11 | Names say what they touch: `Context::accept` and `accept_language` (were `media`, `language`), `reply_buffer` (was `body_mut`), `Builder::www_authenticate` (was `challenge`), `Denial::with_status` and `status()` (were `status` and `status_code()`), `Group::at` (was `new`) | a newcomer reads them without the docs; `status` meant a constructor on `Denial` and a getter on `Error` |
 | D-066 | 2026-11-11 | `App::listen(addr)` and `Sites::listen(addr)`: one TCP listener per resolved address, serve-net's defaults | serving a site needed serve-net's builder, a listener spec, and a second dependency |
 | D-067 | 2026-11-11 | `Events` and `Checkpoint` are implemented for `Arc<T>` | an application keeps a handle to read what its sink counted, or to flip a lockdown; the orphan rule kept applications from writing it |
 | D-068 | 2026-11-11 | `docs/API.md` and the README compile as doctests | the reference cannot drift from the API |
 | D-069 | 2026-11-11 | `ErrorPage` carries the site's base path (`base`, `url(path)`) | an error page of a site in a folder links its stylesheet and home inside the folder; the engine had no other way to learn the base |
 | D-070 | 2026-11-11 | `Denial::unavailable(code)` (503) and `Denial::retry_after(seconds)`; `with_status` still accepts 4xx only | a gate whose stores are down fails closed; clients and load balancers must read that as retryable, not as "you may not". 503 is its own constructor so a gate still cannot turn a denial into a 500 or a success |
 | D-071 | 2026-11-11 | C1 controls (U+0080 to U+009F, `%C2%80` to `%C2%9F`) are controls: refused with 400 `url.control` | D-014 refuses every control character, but only C0 and DEL were checked; NEL (U+0085) is a line break to some log readers. Found by the path property test on CI |
+| D-072 | 2026-11-11 | Large-file replies in parts: one record per reply, per application, from the first part to the last or to `HttpService::done` (implemented by `App` and `Sites`; a wrapper forwards it); never evicted; a full table (16,384) refuses a new one with 503; parts of 256 KiB, read into one reused buffer | review of 0.9.0 F-1: a per-thread table of 256 forgot downloads still in progress, which restarted from byte 0 mid-body and ended cleanly with the wrong bytes |
+| D-073 | 2026-11-11 | One `catch_unwind` around the whole pipeline (gate, checkpoint, readiness, identity), one around each event sink call, one around the error template; after a panic the built-in page answers and `Panicked` is reported; the crate's release profile unwinds | F-2: only handlers and hooks were caught, and SECURITY T-5 said otherwise |
+| D-074 | 2026-11-11 | A per-mount cache of resolutions (two seconds, a hit checked with `symlink_metadata`) and of small files' bytes (64 KiB each, 32 MiB per mount, valid while length and time hold) | F-3: every request and every part resolved the path again |
+| D-075 | 2026-11-11 | The 405 and automatic `OPTIONS` answers run after an access check: someone who may use none of the route's methods gets the gate's denial (404 for a hidden route) | F-4: they revealed routes the gate hides; replaces O-6's answer |
+| D-076 | 2026-11-11 | With no host declared, the site is the development hosts only; `Builder::any_host` answers every host | F-5: any `Host` was the site by default, the opening for DNS rebinding against internal tools |
+| D-077 | 2026-11-11 | With `lowercase_paths`, an upper-case route literal is a build problem | F-6: it built and could never match |
+| D-078 | 2026-11-11 | `Context::url` (and `ErrorPage::url`) refuse a target that is not a site path (`url.not_local`); `Context::url_path` encodes each segment | F-7: `url("//evil.example")` gave a link to another host |
+| D-079 | 2026-11-11 | Compression adds `accept-encoding` to a handler's own `Vary` | F-8: it dropped it, so a cache keyed on the handler's names could hand gzip to a client that did not accept it |
+| D-080 | 2026-11-11 | Large files keep going out chunked, without `Content-Length` (O-9) | F-9: serve-net has no declared-length stream and refuses the field from a service |
+| D-081 | 2026-11-11 | A checkpoint's `Deny { status }` outside 400 to 599 is answered as 403, at both stages | F-10: `Deny { status: 200 }` answered a revoked visitor with a success status |
+| D-082 | 2026-11-11 | A group's rule holds for every route in it: a route's own rule adds to it (both checked, outermost first); a route declared public inside a group with a rule stops the build | F-11: a route's rule replaced its group's, so narrowing one admin route opened it to non-admins |
+| D-083 | 2026-11-11 | cookie-net 0.8, form-net 0.10, csrf-sec 0.10, compress-lib 1.0, parse-net 0.9.3; the README says which third-party crates come through crypt-io | F-12: the README claimed none, and three parse-net versions were built; two remain (0.6 through form-net, 0.7 through serve-net's http-net), asked of those crates |
+| D-084 | 2026-11-11 | `Cx` is `Context`; every public item has its own runnable example; `escape_html`; the reference is a keyed hash (no counter shows); notes on wildcards, unwinding, entity-tag granularity, and BREACH | F-13 and the review's notes N-1 to N-6 |
+| D-085 | 2026-11-11 | `Request::cookie` reads every `Cookie` field as one header (each through cookie-net's `get_unique`, the total held to its length limit); a name in two fields is ambiguous | HTTP/2 and HTTP/3 split the cookie into crumbs (RFC 9113 section 8.2.3), so refusing a second field would refuse their real requests; cookie tossing is still refused by name |
 | D-059 | 2026-11-09 | `Sites` lets a site with lower-case paths claim upper-case spellings of its base | it redirects them itself, instead of another site answering |
 | D-060 | 2026-11-09 | The CSRF step always applies csrf-sec's origin policy and a token; csrf-sec's `Mode` setting does not loosen it | one strict rule for every route; a looser mode would need its own decision |
 | D-056 | 2026-11-09 | `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]` | web-net makes them and callers read them; a field added in 1.x must not break anyone |
-| D-057 | 2026-11-09 | `Cx::next_path` reads the sign-in redirect's `next` and returns it only when it is a path of this site | the sign-in page is the classic open-redirect target |
-| D-058 | 2026-11-09 | `Render` has a generic associated view type (`type View<'a>: ?Sized`); `App`, `Builder`, `Cx`, `Route`, and `Sites` are generic over the engine (`E = NoRender`); dynamic engines use `type View<'a> = dyn View + 'a` and handlers call `Cx::render_view`; error pages go through `Render::error_page` | agreed with the Luminess session and the coordinator: a typed engine compiles templates at boot against the application's own types and reads them directly, which `&dyn View` cannot carry (one wrapper per nested value); a GAT keeps borrowed views working for both kinds, and static dispatch costs nothing at run time |
+| D-057 | 2026-11-09 | `Context::next_path` reads the sign-in redirect's `next` and returns it only when it is a path of this site | the sign-in page is the classic open-redirect target |
+| D-058 | 2026-11-09 | `Render` has a generic associated view type (`type View<'a>: ?Sized`); `App`, `Builder`, `Context`, `Route`, and `Sites` are generic over the engine (`E = NoRender`); dynamic engines use `type View<'a> = dyn View + 'a` and handlers call `Context::render_view`; error pages go through `Render::error_page` | agreed with the Luminess session and the coordinator: a typed engine compiles templates at boot against the application's own types and reads them directly, which `&dyn View` cannot carry (one wrapper per nested value); a GAT keeps borrowed views working for both kinds, and static dispatch costs nothing at run time |
 | D-046 | 2026-11-09 | Multipart CSRF tokens are checked before the handler, scanning the body up to its first file part | the 0.4 design let a handler run (and change state) before its reply was replaced; found by an independent review |
 | D-047 | 2026-11-09 | A reply that sets a cookie is never `public`; the cacheability report needs web-net's own `Cache-Control`, no CORS policy, and no cookie | a shared cache must not spread one visitor's cookie or one origin's CORS answer |
 | D-048 | 2026-11-09 | Resolved asset names below the root pass the segment rules again | 8.3 short names reached dot files on Windows |

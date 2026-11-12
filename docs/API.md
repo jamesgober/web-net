@@ -24,7 +24,7 @@ from the code. The design and its reasons are in
 
 - [Setup](#setup)
 - [A site in five lines](#a-site-in-five-lines)
-- [Handlers: `Cx`](#handlers-cx)
+- [Handlers: `Context`](#handlers-cx)
 - [Routes and groups](#routes-and-groups)
 - [The site: hosts, folder, URLs](#the-site-hosts-folder-urls)
 - [Gates: who is asking, and may they](#gates-who-is-asking-and-may-they)
@@ -68,12 +68,16 @@ App::builder()
 
 - `App::builder()` starts an app with the `Open` gate: no sign-in, every
   route public.
-- `get(pattern, handler)` is a route. A handler takes `&mut Cx` and returns
+- `get(pattern, handler)` is a route. A handler takes `&mut Context` and returns
   `web_net::Result`.
 - `build()` checks everything at once and returns `BuildError` listing every
   problem.
 - `App::listen(addr)` serves it: one TCP listener per address `addr`
   resolves to. `wait()` blocks until the server is told to stop.
+- With no host declared, the site answers the development hosts only
+  (`localhost`, `127.0.0.1`, `[::1]`, `*.localhost`), so a name someone else
+  points at the server is never the site. Declare the real host before
+  deploying (`.host("example.com")`), or `.any_host()`.
 
 Testing needs no socket:
 
@@ -81,14 +85,14 @@ Testing needs no socket:
 use web_net::{App, get};
 
 let app = App::builder().route(get("/", |cx| cx.text(200, "hi"))).build()?;
-let reply = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+let reply = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!((reply.status, reply.text()), (200, "hi"));
 # Ok::<(), web_net::BuildError>(())
 ```
 
-## Handlers: `Cx`
+## Handlers: `Context`
 
-A handler receives a `Cx`: the request, who sent it, and the reply. There is
+A handler receives a `Context`: the request, who sent it, and the reply. There is
 no public way to make one; web-net builds it only after the request passed
 its route's access check. The reply is held until the handler returns; on an
 error or a panic it is thrown away and the error page goes out instead.
@@ -106,7 +110,7 @@ let app = App::builder()
         cx.text(200, &format!("user {id}, tab {tab}"))
     }))
     .build()?;
-let r = serve_net::testing::respond(&app, b"GET /users/7?tab=posts HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"GET /users/7?tab=posts HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!(r.text(), "user 7, tab posts");
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -128,7 +132,8 @@ Reading the request:
 | `accept(offers)` | the best of `offers` for `Accept`, or `None` |
 | `accept_language(offers)` | the best of `offers` for `Accept-Language`, or `None` |
 | `next_path()` | `Result<Option<String>>`: the `next` a sign-in redirect carried, only when it is a path of this site |
-| `url(path)` | `String`: a site path with the base path in front, for links |
+| `url(path)` | `Result<String>`: a site path with the base path in front, for links; 500 `url.not_local` for anything else (`//host`, `https://..`) |
+| `url_path(&[segments])` | `String`: a link from segments, each encoded (`["tags", tag]`), for paths built from input |
 
 Writing the reply. Each of the first five is a whole reply and returns
 `Result`, so a handler ends with it:
@@ -165,7 +170,7 @@ let app = App::builder()
         }
     }))
     .build()?;
-let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"rev-7\"\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"rev-7\"\r\n\r\n");
 assert_eq!(r.status, 304);
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -175,18 +180,18 @@ because Rust checks the closure before the builder fixes the type. Named
 functions need nothing extra:
 
 ```rust
-use web_net::{Cx, Identity, Route, get};
+use web_net::{Context, Identity, Route, get};
 
 struct User { name: String }
 impl Identity for User { fn is_guest(&self) -> bool { false } }
 
-fn account(cx: &mut Cx<'_, User>) -> web_net::Result {
+fn account(cx: &mut Context<'_, User>) -> web_net::Result {
     let name = cx.identity().name.clone();
     cx.text(200, &name)
 }
 
 let by_fn: Route<User, ()> = get("/account", account).allow(());
-let by_closure: Route<User, ()> = get("/me", |cx: &mut Cx<'_, User>| {
+let by_closure: Route<User, ()> = get("/me", |cx: &mut Context<'_, User>| {
     let name = cx.identity().name.clone();
     cx.text(200, &name)
 })
@@ -215,7 +220,7 @@ let app = App::builder()
             .route(delete("/items/:id", |cx| cx.text(204, "")).csrf_exempt("example")),
     )
     .build()?;
-let r = serve_net::testing::respond(&app, b"GET /files/a/b.txt HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"GET /files/a/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!(r.text(), "a/b.txt");
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -246,12 +251,14 @@ assert_eq!(r.text(), "a/b.txt");
 | `work(WorkClass)` | serve-net's work class, for admission (default `Quick`) |
 
 `Group` methods: `at(prefix)`, `route(Route)`, `group(Group)`, `public()`,
-`allow(rule)`, `cors(Cors)`, `cache(CachePolicy)`. A route that declares its
-own access, CORS, or cache keeps it; one that declares none takes the
-group's.
+`allow(rule)`, `cors(Cors)`, `cache(CachePolicy)`. A group's rule holds for
+every route in it: a route's own rule adds to it (both are checked, the
+group's first), and a route declared public inside a group with a rule stops
+the build. A route that declares its own CORS or cache keeps it; one that
+declares none takes the group's.
 
 `Handler<I, E>` is the trait every handler implements; any
-`Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync + 'static` is one.
+`Fn(&mut Context<'_, I, E>) -> Result + Send + Sync + 'static` is one.
 
 ## The site: hosts, folder, URLs
 
@@ -259,9 +266,10 @@ group's.
 
 | Method | Effect |
 |---|---|
-| `host(&str)` | a host the site answers; the first is canonical; none declared means any host |
+| `host(&str)` | a host the site answers; the first is canonical; none declared means the development hosts only |
+| `any_host()` | every host is the site (behind a front that checked it); not with `host` |
 | `alias(&str)` | a host redirected to the canonical one |
-| `development()` | `localhost`, `127.0.0.1`, `[::1]`, `*.localhost` are the site too; HTTPS not required for them |
+| `development()` | with declared hosts, `localhost`, `127.0.0.1`, `[::1]`, `*.localhost` are the site too; HTTPS not required for them |
 | `base(&str)` | the folder the site is installed under (`/blog`) |
 | `trailing_slash(TrailingSlash)` | `Strip` (default), `Add`, `Ignore` |
 | `lowercase_paths()` | upper-case paths are redirected to lower case |
@@ -271,7 +279,7 @@ group's.
 | `sign_in(path)` | where a sign-in denial on `GET` and `HEAD` sends the visitor (303, with `next`) |
 | `www_authenticate(&str)` | the `WWW-Authenticate` value with a 401 (default `Session`) |
 | `csrf(csrf_sec::Csrf)` | CSRF protection |
-| `redirect_hosts(&[&str])` | hosts `Cx::redirect_external` may send to |
+| `redirect_hosts(&[&str])` | hosts `Context::redirect_external` may send to |
 | `assets(Assets)`, `health(path)`, `ready(path, check)` | see [Static files](#static-files-and-health) |
 | `security_headers(SecurityHeaders)`, `compress(Compression)` | see [Headers](#headers-caching-compression-cors) |
 | `hook(Hook, Routes, f)` | see [Hooks](#hooks) |
@@ -289,7 +297,7 @@ let app = App::builder()
     .base("/blog")
     .trailing_slash(TrailingSlash::Strip)
     .route(get("/posts/:slug", |cx| {
-        let home = cx.url("/");
+        let home = cx.url("/")?;
         cx.html(200, &format!("<a href=\"{home}\">home</a>"))
     }))
     .build()?;
@@ -318,7 +326,7 @@ values), so every route is public. With your own gate, every route declares
 fails at start-up, not in production.
 
 ```rust
-use web_net::{App, Cx, Denial, Gate, Identity, Request, get};
+use web_net::{App, Context, Denial, Gate, Identity, Request, get};
 
 struct User { name: Option<String> }
 impl Identity for User {
@@ -350,7 +358,7 @@ let app = App::with_gate(Sessions)
     .sign_in("/login")
     .route(get("/", |cx| cx.text(200, "home")).public())
     .route(get("/login", |cx| cx.text(200, "sign in")).public())
-    .route(get("/account", |cx: &mut Cx<'_, User>| {
+    .route(get("/account", |cx: &mut Context<'_, User>| {
         let name = cx.identity().name.clone().unwrap_or_default();
         cx.text(200, &name)
     })
@@ -358,9 +366,9 @@ let app = App::with_gate(Sessions)
     .build()?;
 
 use serve_net::testing::respond;
-let r = respond(&app, b"GET /account HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = respond(&app, b"GET /account HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!((r.status, r.header("location")), (303, Some(&b"/login?next=/account"[..])));
-let r = respond(&app, b"GET /account HTTP/1.1\r\nHost: a\r\nCookie: sid=ann\r\n\r\n");
+let r = respond(&app, b"GET /account HTTP/1.1\r\nHost: localhost\r\nCookie: sid=ann\r\n\r\n");
 assert_eq!(r.text(), "ann");
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -390,7 +398,7 @@ or the `csrf_token` field. A route that takes an unsafe method needs
 
 ```rust
 use web_net::form_net::{self, FromForm};
-use web_net::{App, Cx, Denial, Gate, Identity, Request, csrf_sec::Csrf, get, post};
+use web_net::{App, Context, Denial, Gate, Identity, Request, csrf_sec::Csrf, get, post};
 
 struct Visitor;
 impl Identity for Visitor {
@@ -412,11 +420,11 @@ form_net::form! {
 
 let app = App::with_gate(Sessions)
     .csrf(Csrf::new(*b"a persisted 32-byte secret key!!").unwrap())
-    .route(get("/account/email", |cx: &mut Cx<'_, Visitor>| {
+    .route(get("/account/email", |cx: &mut Context<'_, Visitor>| {
         let token = cx.csrf_token()?;
         cx.html(200, &format!("<form method=post><input type=hidden name=csrf_token value=\"{token}\">..."))
     }).public())
-    .route(post("/account/email", |cx: &mut Cx<'_, Visitor>| {
+    .route(post("/account/email", |cx: &mut Context<'_, Visitor>| {
         match cx.form::<Email>() {
             Ok(form) => { let _ = form.email; cx.redirect(303, "/account") }
             Err(e) if e.status_hint() == 422 => cx.html(422, "<p>check the form</p>"),
@@ -425,17 +433,17 @@ let app = App::with_gate(Sessions)
     }).public())
     .build()?;
 
-let r = serve_net::testing::respond(&app, b"POST /account/email HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"POST /account/email HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
 assert_eq!(r.status, 403); // no token
 # Ok::<(), web_net::BuildError>(())
 ```
 
 | Item | What it does |
 |---|---|
-| `Cx::form::<T>()` | a typed form (urlencoded, or multipart text fields), with the route's `form_limits`; the error keeps form-net's detail for a 422 page |
-| `Cx::form_inspected::<T, N>(&mut N)` | the same, with an inspector that sees every part first |
-| `Cx::upload(&Store)` | a multipart upload into a `form_net::Store` (feature `uploads`); `upload_inspected` with an inspector |
-| `Cx::csrf_token()` | a fresh masked token for the visitor's binding |
+| `Context::form::<T>()` | a typed form (urlencoded, or multipart text fields), with the route's `form_limits`; the error keeps form-net's detail for a 422 page |
+| `Context::form_inspected::<T, N>(&mut N)` | the same, with an inspector that sees every part first |
+| `Context::upload(&Store)` | a multipart upload into a `form_net::Store` (feature `uploads`); `upload_inspected` with an inspector |
+| `Context::csrf_token()` | a fresh masked token for the visitor's binding |
 | `Builder::csrf(Csrf)`, `Route::csrf_exempt(reason)` | protection, or an exemption with its reason |
 
 Refusal codes: `csrf.no_binding`, `csrf.missing`, `csrf.duplicate`,
@@ -450,7 +458,7 @@ compiles against the application's own types; a dynamic engine reads any
 handlers are typed by it).
 
 ```rust
-use web_net::{App, Cx, Guest, Output, Render, RenderError, TemplateId, get};
+use web_net::{App, Context, Guest, Output, Render, RenderError, TemplateId, get};
 
 struct Page<'a> { title: &'a str }
 struct Pages;
@@ -468,9 +476,9 @@ impl Render for Pages {
 
 let app = App::builder()
     .render(Pages)
-    .route(get("/", |cx: &mut Cx<'_, Guest, Pages>| cx.render(&Page { title: "Home" })).template("page"))
+    .route(get("/", |cx: &mut Context<'_, Guest, Pages>| cx.render(&Page { title: "Home" })).template("page"))
     .build()?;
-let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!(r.text(), "<h1>Home</h1>");
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -499,7 +507,7 @@ let app = App::builder()
     .route(get("/", |cx| cx.render_view(&Fields(&[("title", Value::Text("Home"))]))).template("t"))
     .route(get("/named", |cx| cx.render_view_named("t", &Fields(&[("title", Value::Text("Named"))]))))
     .build()?;
-let r = serve_net::testing::respond(&app, b"GET /named HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"GET /named HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!(r.text(), "Named");
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -517,9 +525,10 @@ assert_eq!(r.text(), "Named");
 | `trait List { fn len; fn is_empty; fn get }` | a list value |
 | `enum Value { Absent, Bool, Int, Float, Text, Html, Display, View, List }` | one value; `is_absent()`, `as_text()` |
 | `SafeHtml::trusted(&str)`, `as_str()` | HTML the engine writes without escaping |
+| `escape_html(&str)` | text made safe for HTML, for a handler that writes HTML itself (`cx.html(200, &format!("<p>{}</p>", escape_html(&name)))`) |
 | `Fields(&[(&str, Value)])` | a ready-made view |
-| `Cx::render(&view)`, `Cx::render_named(name, &view)` | the route's template, or one by name |
-| `Cx::render_view(&dyn View)`, `Cx::render_view_named(name, &dyn View)` | the same for a dynamic engine (Rust cannot coerce to `dyn View` during inference) |
+| `Context::render(&view)`, `Context::render_named(name, &view)` | the route's template, or one by name |
+| `Context::render_view(&dyn View)`, `Context::render_view_named(name, &dyn View)` | the same for a dynamic engine (Rust cannot coerce to `dyn View` during inference) |
 | `Builder::page_limit(bytes)` | the most one page may write (`DEFAULT_PAGE_LIMIT`, 8 MiB) |
 
 ## Static files and health
@@ -533,7 +542,7 @@ let app = App::builder()
     .health("/healthz")
     .ready("/readyz", || true)
     .build()?;
-let r = serve_net::testing::respond(&app, b"GET /healthz HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!((r.status, r.text()), (200, "ok"));
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -553,6 +562,20 @@ Files get `ETag`, `Last-Modified`, 304, ranges, and no way out of the folder
 (dot segments, encoded slashes, drive letters, device names, and Windows
 short names are refused).
 
+- Each mount caches what a path resolved to for two seconds; a hit costs
+  one metadata call that does not follow links. Files up to 64 KiB keep
+  their bytes in the cache while their length and modification time hold.
+- The entity tag is the length and modification time (and the coding), so
+  a rewrite of the same size within the file system's time granularity (two
+  seconds on FAT, coarse on some network shares) keeps the tag. Files whose
+  names change with their content avoid that.
+- A file over 1 MiB goes out in 256 KiB parts, chunked: serve-net has no
+  stream with a declared length yet, so it carries no `Content-Length`
+  (HEAD included). Each part checks the file is the one the first part
+  found; a change ends the connection, never with other bytes. At most
+  16,384 such replies run at once per application; past that a new one is
+  503 with `Retry-After`.
+
 ## Headers, caching, compression, CORS
 
 ```rust
@@ -565,7 +588,7 @@ let app = App::builder()
     .route(get("/api/items", |cx| cx.bytes(200, "application/json", b"[]"))
         .cors(Cors::new().origin("https://app.example.com").max_age(600)))
     .build()?;
-let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!(r.header("cache-control"), Some(&b"public, max-age=60"[..]));
 assert!(r.header("content-security-policy").is_some());
 # Ok::<(), web_net::BuildError>(())
@@ -579,9 +602,9 @@ assert!(r.header("content-security-policy").is_some());
 | `.hsts(max_age, include_subdomains)`, `.no_hsts()` | HSTS (sent on HTTPS only) |
 | `SecurityHeaders::none()` | no security headers (a proxy in front sets them) |
 | `CachePolicy::{Unset, NoStore, Private { max_age }, Public { max_age }, Guests { max_age }}` | `Cache-Control` per route or group; a reply that sets a cookie is always `private, no-store` |
-| `Compression::default()`, `.min_bytes(n)`, `.level(n)` | gzip for compressible replies (default 1024 bytes, level 6) |
+| `Compression::default()`, `.min_bytes(n)`, `.level(n)` | gzip for compressible replies (default 1024 bytes, level 6) ; adds `accept-encoding` to `Vary`. A page that carries a secret beside reflected input leaves it off (BREACH) |
 | `Cors::new()`, `.origin(o)`, `.any_origin()`, `.headers(&[..])`, `.expose(&[..])`, `.credentials()`, `.max_age(s)` | CORS per route or group; preflights are answered before the gate |
-| `Builder::redirect_hosts(&[..])`, `Cx::redirect_external(status, url)` | the only way to redirect to another site |
+| `Builder::redirect_hosts(&[..])`, `Context::redirect_external(status, url)` | the only way to redirect to another site |
 | `Builder::wipe_buffers()` | zero the reused reply buffers after every request |
 
 ## Hooks
@@ -602,7 +625,7 @@ let app = App::builder()
     .route(get("/", |cx| cx.text(200, "home")).name("home"))
     .route(get("/docs/intro", |cx| cx.text(200, "intro")))
     .build()?;
-let r = serve_net::testing::respond(&app, b"GET /docs/intro HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"GET /docs/intro HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!(r.header("x-section"), Some(&b"docs"[..]));
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -611,7 +634,7 @@ assert_eq!(r.header("x-section"), Some(&b"docs"[..]));
 |---|---|
 | `Hook::Routed` | after the access check, before the handler |
 | `Hook::Finish` | after the handler succeeded |
-| `Hook::BeforeRender` | inside `Cx::render`, before the engine |
+| `Hook::BeforeRender` | inside `Context::render`, before the engine |
 | `Routes::all()`, `Routes::prefix(p)`, `Routes::named(&[..])` | which routes (a prefix matches whole segments) |
 
 ## Events and checkpoints
@@ -647,7 +670,7 @@ let app = App::builder()
     .checkpoint(Lockdown::default())
     .route(get("/", |cx| cx.text(200, "hi")))
     .build()?;
-serve_net::testing::respond(&app, b"GET /nope HTTP/1.1\r\nHost: a\r\n\r\n");
+serve_net::testing::respond(&app, b"GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!(seen.0.load(Ordering::Relaxed), 1);
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -666,7 +689,11 @@ assert_eq!(seen.0.load(Ordering::Relaxed), 1);
 A gateway that authenticated a request already calls `App::respond` with
 the identity: web-net does not call the gate's `authenticate` (nor write
 the gate's cookie), and authorization still runs per route. The report says
-which route ran and whether a cache may keep the reply for guests.
+which route ran and whether a cache may keep the reply for guests. The
+gateway forwards serve-net's `done` to the app too
+(`HttpService::done(&app, env, finished)`): a large file sent in parts keeps
+a record until its last part or `done`, and without `done` the records of
+dropped downloads pile up until new large files are refused with 503.
 
 ```rust
 use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
@@ -685,7 +712,7 @@ impl HttpService for Front {
 let app = App::builder()
     .route(get("/", |cx| cx.text(200, "hi")).cache(CachePolicy::Guests { max_age: 30 }))
     .build()?;
-let r = serve_net::testing::respond(&Front(app), b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = serve_net::testing::respond(&Front(app), b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!(r.text(), "hi");
 # Ok::<(), web_net::BuildError>(())
 ```
@@ -697,7 +724,7 @@ assert_eq!(r.text(), "hi");
 | `Served { outcome, route, cache }`, `Cacheable::{No, Guests { max_age }}` | what ran |
 | `App::classify(&HttpHead)` | `Classified { route: Option<RouteId>, work }` before admission, without answering or calling the gate |
 | `RouteId(u32)` | a route, stable for the app's lifetime |
-| `impl HttpService for App` | `call` is `respond(.., None, ..)` |
+| `impl HttpService for App` | `call` is `respond(.., None, ..)`; `done` frees what the request held |
 | `Sites::new().site(app).site(app2)` | several apps in one server, picked by host and base path |
 | `Sites::listen(addr)`, `Sites::respond(..)`, `Sites::pick(&HttpRequest)` | as on `App`; which app a request goes to |
 
@@ -717,7 +744,8 @@ inside the site), `query()`, `host()`, `header(name)`, `header_str(name)`,
 `cookie(name) -> Result<Option<&str>, Ambiguous>` (a name sent twice is
 `Ambiguous`, never resolved by picking one), `client()`, `scheme()`,
 `route()` (the matched pattern), `id()`, `envelope()`, `raw()`. `RequestId`
-displays as `<connection hex>-<seq>`, with `connection()` and `seq()`.
+displays as 16 hexadecimal digits, a keyed hash that shows no counter;
+`connection()` and `seq()` give the raw values for logs.
 
 ## Errors
 
@@ -731,7 +759,7 @@ let app = App::builder()
         Ok(())
     }))
     .build()?;
-let r = serve_net::testing::respond(&app, b"GET /report HTTP/1.1\r\nHost: a\r\n\r\n");
+let r = serve_net::testing::respond(&app, b"GET /report HTTP/1.1\r\nHost: localhost\r\n\r\n");
 assert_eq!(r.status, 500);
 assert!(r.text().contains("Reference:"));
 
@@ -752,13 +780,16 @@ assert_eq!(problems.problems().len(), 2);
 
 Codes web-net reports: `url.*` (as `UrlError::code`), `host.unknown`,
 `site.outside_base`, `route.none`, `route.param`, `route.no_param`,
-`assets.none`, `cors.denied`, `method.not_allowed`, `method.unknown`,
-`query.duplicate`, `query.invalid`, `redirect.not_local`,
-`redirect.not_allowed`, `redirect.status`, `render.no_engine`,
-`render.no_template`, `render.too_large`, `checkpoint.denied`,
+`assets.none`, `assets.unreadable`, `assets.busy` (503), `cors.denied`,
+`method.not_allowed`, `method.unknown`, `query.duplicate`, `query.invalid`,
+`url.not_local`, `redirect.not_local`, `redirect.not_allowed`,
+`redirect.status`, `render.no_engine`, `render.no_template`,
+`render.too_large`, `render.error_page_panic`, `checkpoint.denied`,
 `checkpoint.killed`, `reply.invalid_field`, `handler.panic`,
-`precondition.failed`, the `csrf.*` codes, plus the gates' and handlers'
-own.
+`pipeline.panic`, `precondition.failed`, the `csrf.*` codes, plus the
+gates' and handlers' own. A panic anywhere in the application's code on the
+request path is answered with the built-in 500 page and reported as
+`EventKind::Panicked` (this needs `panic = "unwind"`, the default).
 
 ## Constants and re-exports
 
@@ -776,7 +807,7 @@ assert_eq!(web_net::VERSION.split('.').count(), 3);
 - `INLINE_LIMIT`: files up to this size are read whole.
 - `DEFAULT_CSP`: the default content security policy.
 - `cookie_net`, `csrf_sec`, `form_net`: the crates web-net uses, at the
-  versions it uses, for `Cx::set_cookie`, `Builder::csrf`, and `Cx::form`.
+  versions it uses, for `Context::set_cookie`, `Builder::csrf`, and `Context::form`.
 
 ## Examples in the repository
 

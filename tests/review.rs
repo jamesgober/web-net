@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use serve_net::testing::{TestConnection, TestReply, respond};
 use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
-use web_net::{App, Assets, Cors, Cx, Denial, Gate, Identity, Request, TrailingSlash, get};
+use web_net::{App, Assets, Context, Cors, Denial, Gate, Identity, Request, TrailingSlash, get};
 
 fn send(app: &impl HttpService, raw: &str) -> TestReply {
     respond(app, format!("{raw}\r\n\r\n").as_bytes())
@@ -49,7 +49,10 @@ fn test_file_changed_between_parts_ends_the_connection() {
     };
     let mut conn = TestConnection::new(swap);
     let mut out = Vec::new();
-    conn.send_into(b"GET /s/big.bin HTTP/1.1\r\nHost: a\r\n\r\n", &mut out);
+    conn.send_into(
+        b"GET /s/big.bin HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        &mut out,
+    );
     assert!(out.starts_with(b"HTTP/1.1 200"));
     assert!(
         !out.ends_with(b"0\r\n\r\n"),
@@ -91,21 +94,21 @@ impl Gate for StaleGate {
 fn stale() -> App<StaleGate> {
     App::with_gate(StaleGate)
         .route(
-            get("/signin", |cx: &mut Cx<'_, Stale>| {
+            get("/signin", |cx: &mut Context<'_, Stale>| {
                 cx.set_header("set-cookie", "sid=fresh; Path=/; HttpOnly");
                 cx.text(200, "in")
             })
             .public(),
         )
         .route(
-            get("/page", |cx: &mut Cx<'_, Stale>| {
+            get("/page", |cx: &mut Context<'_, Stale>| {
                 cx.set_header("cache-control", "public, max-age=600");
                 cx.text(200, "page")
             })
             .public(),
         )
         .route(
-            get("/api", |cx: &mut Cx<'_, Stale>| cx.text(200, "api"))
+            get("/api", |cx: &mut Context<'_, Stale>| cx.text(200, "api"))
                 .public()
                 .cors(Cors::new().origin("https://app.example")),
         )
@@ -116,7 +119,7 @@ fn stale() -> App<StaleGate> {
 /// The handler's fresh session cookie is not cancelled by the gate's clear.
 #[test]
 fn test_handler_cookie_beats_the_gate_clear() {
-    let r = send(&stale(), "GET /signin HTTP/1.1\r\nHost: a");
+    let r = send(&stale(), "GET /signin HTTP/1.1\r\nHost: localhost");
     let sids: Vec<&[u8]> = r
         .headers
         .iter()
@@ -129,7 +132,7 @@ fn test_handler_cookie_beats_the_gate_clear() {
 /// A reply that sets a cookie is never public, even when the handler said so.
 #[test]
 fn test_pending_cookie_overrides_public_cache_control() {
-    let r = send(&stale(), "GET /page HTTP/1.1\r\nHost: a");
+    let r = send(&stale(), "GET /page HTTP/1.1\r\nHost: localhost");
     assert_eq!(h(&r, "cache-control"), "private, no-store");
     assert_eq!(h(&r, "set-cookie"), CLEAR);
 }
@@ -143,9 +146,12 @@ fn test_health_under_add() {
         .ready("/readyz", || true)
         .build()
         .unwrap();
-    assert_eq!(send(&app, "GET /healthz HTTP/1.1\r\nHost: a").status, 200);
     assert_eq!(
-        send(&app, "GET /readyz HTTP/1.1\r\nHost: a").text(),
+        send(&app, "GET /healthz HTTP/1.1\r\nHost: localhost").status,
+        200
+    );
+    assert_eq!(
+        send(&app, "GET /readyz HTTP/1.1\r\nHost: localhost").text(),
         "ready"
     );
 }
@@ -156,7 +162,7 @@ fn test_health_under_add() {
 fn test_preflight_before_the_gate() {
     let r = send(
         &stale(),
-        "OPTIONS /api HTTP/1.1\r\nHost: a\r\nX-Deny: 1\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: GET",
+        "OPTIONS /api HTTP/1.1\r\nHost: localhost\r\nX-Deny: 1\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: GET",
     );
     assert_eq!(r.status, 204);
     assert_eq!(h(&r, "access-control-allow-origin"), "https://app.example");

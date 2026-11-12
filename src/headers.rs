@@ -26,6 +26,15 @@ pub struct SecurityHeaders {
 }
 
 /// The default content security policy.
+///
+/// ```
+/// use web_net::{App, DEFAULT_CSP, get};
+///
+/// let app = App::builder().route(get("/", |cx| cx.text(200, "ok"))).build()?;
+/// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.header("content-security-policy"), Some(DEFAULT_CSP.as_bytes()));
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 pub const DEFAULT_CSP: &str = "default-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 
 impl Default for SecurityHeaders {
@@ -44,6 +53,19 @@ impl Default for SecurityHeaders {
 impl SecurityHeaders {
     /// No security headers at all (`x-content-type-options: nosniff` is
     /// still sent: it has no cost and no downside).
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// let app = App::builder()
+    ///     .security_headers(SecurityHeaders::none())
+    ///     .route(get("/", |cx| cx.text(200, "ok")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert!(r.header("content-security-policy").is_none());
+    /// assert_eq!(r.header("x-content-type-options"), Some(&b"nosniff"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn none() -> Self {
         Self {
@@ -57,6 +79,18 @@ impl SecurityHeaders {
     }
 
     /// `Content-Security-Policy`.
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// let app = App::builder()
+    ///     .security_headers(SecurityHeaders::default().content_security_policy("default-src 'self'"))
+    ///     .route(get("/", |cx| cx.text(200, "ok")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("content-security-policy"), Some(&b"default-src 'self'"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn content_security_policy(mut self, value: &str) -> Self {
         self.csp = Some(value.into());
@@ -64,6 +98,18 @@ impl SecurityHeaders {
     }
 
     /// No `Content-Security-Policy`.
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// let app = App::builder()
+    ///     .security_headers(SecurityHeaders::default().no_content_security_policy())
+    ///     .route(get("/", |cx| cx.text(200, "ok")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("content-security-policy"), None);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn no_content_security_policy(mut self) -> Self {
         self.csp = None;
@@ -72,6 +118,18 @@ impl SecurityHeaders {
 
     /// `X-Frame-Options` (`DENY` by default; `SAMEORIGIN` to allow the site's
     /// own frames).
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// let app = App::builder()
+    ///     .security_headers(SecurityHeaders::default().frame_options("SAMEORIGIN"))
+    ///     .route(get("/", |cx| cx.text(200, "ok")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("x-frame-options"), Some(&b"SAMEORIGIN"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn frame_options(mut self, value: &str) -> Self {
         self.frame = Some(value.into());
@@ -79,6 +137,18 @@ impl SecurityHeaders {
     }
 
     /// `Referrer-Policy`.
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// let app = App::builder()
+    ///     .security_headers(SecurityHeaders::default().referrer_policy("no-referrer"))
+    ///     .route(get("/", |cx| cx.text(200, "ok")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("referrer-policy"), Some(&b"no-referrer"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn referrer_policy(mut self, value: &str) -> Self {
         self.referrer = Some(value.into());
@@ -86,6 +156,18 @@ impl SecurityHeaders {
     }
 
     /// `Permissions-Policy`.
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// let app = App::builder()
+    ///     .security_headers(SecurityHeaders::default().permissions_policy("camera=(self)"))
+    ///     .route(get("/", |cx| cx.text(200, "ok")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("permissions-policy"), Some(&b"camera=(self)"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn permissions_policy(mut self, value: &str) -> Self {
         self.permissions = Some(value.into());
@@ -93,6 +175,18 @@ impl SecurityHeaders {
     }
 
     /// `Cross-Origin-Opener-Policy`.
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// let app = App::builder()
+    ///     .security_headers(SecurityHeaders::default().opener_policy("same-origin-allow-popups"))
+    ///     .route(get("/", |cx| cx.text(200, "ok")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("cross-origin-opener-policy"), Some(&b"same-origin-allow-popups"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn opener_policy(mut self, value: &str) -> Self {
         self.coop = Some(value.into());
@@ -102,6 +196,21 @@ impl SecurityHeaders {
     /// `Strict-Transport-Security`, sent on HTTPS replies only and never to
     /// a development host. `include_subdomains` commits every subdomain to
     /// HTTPS too: set it only when they all have it.
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// let app = App::builder()
+    ///     .host("example.com")
+    ///     .security_headers(SecurityHeaders::default().hsts(63_072_000, true))
+    ///     .route(get("/", |cx| cx.text(200, "ok")))
+    ///     .build()?;
+    /// let r = serve_net::testing::TestRequest::new(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+    ///     .scheme(serve_net::Scheme::Https)
+    ///     .send(&app);
+    /// assert_eq!(r.header("strict-transport-security"), Some(&b"max-age=63072000; includeSubDomains"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn hsts(mut self, max_age: u64, include_subdomains: bool) -> Self {
         let mut v = format!("max-age={max_age}");
@@ -113,6 +222,21 @@ impl SecurityHeaders {
     }
 
     /// No `Strict-Transport-Security`.
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// let app = App::builder()
+    ///     .host("example.com")
+    ///     .security_headers(SecurityHeaders::default().no_hsts())
+    ///     .route(get("/", |cx| cx.text(200, "ok")))
+    ///     .build()?;
+    /// let r = serve_net::testing::TestRequest::new(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+    ///     .scheme(serve_net::Scheme::Https)
+    ///     .send(&app);
+    /// assert_eq!(r.header("strict-transport-security"), None);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn no_hsts(mut self) -> Self {
         self.hsts = None;

@@ -140,7 +140,20 @@ pub(crate) fn is_local_target(p: &str) -> bool {
 ///
 /// There is no public way to make one: web-net builds it only after the
 /// gate cleared the request.
-pub struct Cx<'r, I, E: Render = NoRender> {
+///
+/// ```
+/// use web_net::{App, Context, Guest, get};
+///
+/// fn home(cx: &mut Context<'_, Guest>) -> web_net::Result {
+///     cx.text(200, "home")
+/// }
+///
+/// let app = App::builder().route(get("/", home)).build()?;
+/// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.text(), "home");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
+pub struct Context<'r, I, E: Render = NoRender> {
     pub(crate) req: Request<'r>,
     pub(crate) who: &'r I,
     pub(crate) caps: Captures,
@@ -154,40 +167,125 @@ pub struct Cx<'r, I, E: Render = NoRender> {
     pub(crate) rendering: bool,
 }
 
-impl<'r, I, E: Render> Cx<'r, I, E> {
+impl<'r, I, E: Render> Context<'r, I, E> {
     // ---------------------------------------------------------------- request
 
     /// The request.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx| {
+    ///         let host = cx.request().host();
+    ///         cx.text(200, host)
+    ///     }))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "localhost");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn request(&self) -> &Request<'r> {
         &self.req
     }
 
     /// The method.
+    ///
+    /// ```
+    /// use serve_net::Method;
+    /// use web_net::{App, Context, Guest, Route};
+    ///
+    /// fn which(cx: &mut Context<'_, Guest>) -> web_net::Result {
+    ///     let m = if cx.method() == Method::Post { "post" } else { "get" };
+    ///     cx.text(200, m)
+    /// }
+    ///
+    /// let app = App::builder()
+    ///     .route(Route::at("/").get(which).post(which).csrf_exempt("example"))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    /// assert_eq!(r.text(), "post");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn method(&self) -> Method {
         self.req.method()
     }
 
     /// The canonical path inside the site.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .base("/app")
+    ///     .route(get("/about", |cx| cx.text(200, cx.path())))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /app/about HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "/about");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn path(&self) -> &'r str {
         self.req.path
     }
 
     /// The first value of a request field.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx| {
+    ///         let agent = cx.header("user-agent").unwrap_or(b"unknown");
+    ///         cx.bytes(200, "text/plain", agent)
+    ///     }))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: demo/1\r\n\r\n");
+    /// assert_eq!(r.text(), "demo/1");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&'r [u8]> {
         self.req.header(name)
     }
 
     /// Who the request comes from: always present, possibly a guest.
+    ///
+    /// ```
+    /// use web_net::{App, Context, Guest, Identity, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx: &mut Context<'_, Guest>| {
+    ///         let who = if cx.identity().is_guest() { "guest" } else { "member" };
+    ///         cx.text(200, who)
+    ///     }))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "guest");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn identity(&self) -> &'r I {
         self.who
     }
 
     /// The request's reference, as shown on error pages.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx| {
+    ///         let reference = cx.id().to_string();
+    ///         cx.text(200, &reference)
+    ///     }))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text().len(), 16);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn id(&self) -> RequestId {
         self.req.id()
@@ -195,13 +293,19 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
 
     /// A route parameter (`:slug` or `*rest`), percent-decoded.
     ///
+    /// The path is canonical (no dot segments), but a `*rest` value is part
+    /// of a URL, not a safe file path: it can hold a drive (`C:/Windows`)
+    /// or names a file system reads specially. Serve files with
+    /// [`Assets`](crate::Assets), which refuses those; never join a
+    /// parameter onto a folder.
+    ///
     /// ```
     /// use web_net::{App, get};
     ///
     /// let app = App::builder()
     ///     .route(get("/posts/:slug", |cx| cx.text(200, &cx.param("slug")?)))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET /posts/hello%20world HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET /posts/hello%20world HTTP/1.1\r\nHost: localhost\r\n\r\n");
     /// assert_eq!(r.text(), "hello world");
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -235,7 +339,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     ///         cx.text(200, &format!("user {id}"))
     ///     }))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET /users/abc HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET /users/abc HTTP/1.1\r\nHost: localhost\r\n\r\n");
     /// assert_eq!(r.status, 404);
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -251,6 +355,21 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     }
 
     /// The first value of a query parameter, decoded (`+` is a space).
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/search", |cx| {
+    ///         let q = cx.query("q")?.unwrap_or_default();
+    ///         cx.text(200, &q)
+    ///     }))
+    ///     .build()?;
+    /// let at = |target: &str| serve_net::testing::respond(&app, format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes());
+    /// assert_eq!(at("/search?q=red+shoes").text(), "red shoes");
+    /// assert_eq!(at("/search?q=a&q=b").status, 400);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -277,6 +396,20 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
 
     /// The raw request body. On an unsafe method its CSRF token was
     /// checked before the handler ran.
+    ///
+    /// ```
+    /// use web_net::{App, post};
+    ///
+    /// let app = App::builder()
+    ///     .route(post("/echo", |cx| {
+    ///         let body = cx.body()?;
+    ///         cx.bytes(200, "text/plain", body)
+    ///     }).csrf_exempt("example: echoes the body"))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
+    /// assert_eq!(r.text(), "hello");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -311,7 +444,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     ///     }).csrf_exempt("example without a session"))
     ///     .build()?;
     /// let r = serve_net::testing::respond(&app,
-    ///     b"POST /signup HTTP/1.1\r\nHost: a\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 15\r\n\r\nemail=a%40b.com");
+    ///     b"POST /signup HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 15\r\n\r\nemail=a%40b.com");
     /// assert_eq!(r.text(), "a@b.com");
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -327,6 +460,37 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
 
     /// As [`form`](Self::form), with an inspector beside the parse (a
     /// content policy that sees every part and field first).
+    ///
+    /// ```
+    /// use web_net::form_net::{self, FromForm, Inspector, Refusal, Verdict};
+    ///
+    /// form_net::form! {
+    ///     pub struct Signup { pub email: String }
+    ///     ignore = ["csrf_token"];
+    /// }
+    ///
+    /// /// Refuses addresses at one domain.
+    /// struct NoSpam;
+    /// impl Inspector for NoSpam {
+    ///     fn field(&mut self, name: &str, value: &[u8]) -> Verdict {
+    ///         if name == "email" && value.ends_with(b"@spam.example") {
+    ///             return Verdict::Refuse(Refusal::new(422, "signup.spam"));
+    ///         }
+    ///         Verdict::Continue
+    ///     }
+    /// }
+    ///
+    /// let app = web_net::App::builder()
+    ///     .route(web_net::post("/signup", |cx| {
+    ///         let form: Signup = cx.form_inspected(&mut NoSpam)?;
+    ///         cx.text(200, &form.email)
+    ///     }).csrf_exempt("example without a session"))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app,
+    ///     b"POST /signup HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 22\r\n\r\nemail=a%40spam.example");
+    /// assert_eq!(r.status, 422);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -352,6 +516,24 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// handler ran, so a forged one stores nothing. Turn the result into a typed form with
     /// `T::from_upload(upload)`.
     ///
+    /// ```
+    /// use web_net::form_net::Store;
+    ///
+    /// let store = Store::memory_only();
+    /// let app = web_net::App::builder()
+    ///     .route(web_net::post("/upload", move |cx| {
+    ///         let upload = cx.upload(&store)?;
+    ///         let stored = upload.file("photo").is_some();
+    ///         cx.text(200, if stored { "stored" } else { "none" })
+    ///     }).csrf_exempt("example without a session"))
+    ///     .build()?;
+    /// let body = "--XyZ\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nabc\r\n--XyZ--\r\n";
+    /// let req = format!("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=XyZ\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    /// let r = serve_net::testing::respond(&app, req.as_bytes());
+    /// assert_eq!(r.text(), "stored");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`form`](Self::form), plus the store's errors.
@@ -365,6 +547,34 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     }
 
     /// As [`upload`](Self::upload), with an inspector beside the parse.
+    ///
+    /// ```
+    /// use web_net::form_net::{Inspector, PartHead, Refusal, Store, Verdict};
+    ///
+    /// /// Takes text fields only.
+    /// struct NoFiles;
+    /// impl Inspector for NoFiles {
+    ///     fn part_start(&mut self, head: &PartHead<'_>) -> Verdict {
+    ///         if head.is_file() {
+    ///             return Verdict::Refuse(Refusal::new(422, "upload.no_files"));
+    ///         }
+    ///         Verdict::Continue
+    ///     }
+    /// }
+    ///
+    /// let store = Store::memory_only();
+    /// let app = web_net::App::builder()
+    ///     .route(web_net::post("/upload", move |cx| {
+    ///         let _upload = cx.upload_inspected(&store, &mut NoFiles)?;
+    ///         cx.text(200, "ok")
+    ///     }).csrf_exempt("example without a session"))
+    ///     .build()?;
+    /// let body = "--XyZ\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"a.txt\"\r\n\r\nabc\r\n--XyZ--\r\n";
+    /// let req = format!("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=XyZ\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    /// let r = serve_net::testing::respond(&app, req.as_bytes());
+    /// assert_eq!(r.status, 422);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -392,6 +602,35 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// `csrf_token` field or a script's `X-CSRF-Token` header. Different on
     /// every call (masked), so a compression side channel cannot recover it.
     ///
+    /// ```
+    /// use web_net::{App, Context, Denial, Gate, Identity, Request, csrf_sec::Csrf, get};
+    ///
+    /// struct Visitor;
+    /// impl Identity for Visitor {
+    ///     fn is_guest(&self) -> bool { false }
+    ///     fn csrf_binding(&self) -> Option<&[u8]> { Some(b"the session id") }
+    /// }
+    /// # struct Sessions;
+    /// # impl Gate for Sessions {
+    /// #     type Identity = Visitor;
+    /// #     type Rule = ();
+    /// #     fn authenticate(&self, _: &Request<'_>) -> Result<Visitor, Denial> { Ok(Visitor) }
+    /// #     fn authorize(&self, _: &Visitor, _: &(), _: &Request<'_>) -> Result<(), Denial> { Ok(()) }
+    /// # }
+    ///
+    /// // `Sessions` is a gate whose identity is `Visitor`.
+    /// let app = App::with_gate(Sessions)
+    ///     .csrf(Csrf::new(*b"a persisted 32-byte secret key!!").unwrap())
+    ///     .route(get("/form", |cx: &mut Context<'_, Visitor>| {
+    ///         let token = cx.csrf_token()?;
+    ///         cx.html(200, &format!("<input type=hidden name=csrf_token value=\"{token}\">"))
+    ///     }).public())
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /form HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert!(r.text().starts_with("<input type=hidden name=csrf_token value=\""));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// 500 `csrf.no_engine` without [`Builder::csrf`](crate::Builder::csrf);
@@ -416,6 +655,21 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// version of what an unsafe request would change (RFC 9110 section
     /// 13.2): `tag` is its entity tag's opaque part, `modified` its
     /// modification time. Call it before changing anything.
+    ///
+    /// ```
+    /// use web_net::{App, put};
+    ///
+    /// let app = App::builder()
+    ///     .route(put("/doc", |cx| {
+    ///         cx.precondition(Some("v2"), None)?; // the stored version is "v2"
+    ///         cx.text(200, "saved")
+    ///     }).csrf_exempt("example"))
+    ///     .build()?;
+    /// let send = |tag: &str| serve_net::testing::respond(&app, format!("PUT /doc HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"{tag}\"\r\nContent-Length: 0\r\n\r\n").as_bytes()).status;
+    /// assert_eq!(send("v1"), 412);
+    /// assert_eq!(send("v2"), 200);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -453,6 +707,21 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// [`render`](Self::render) or [`reply_buffer`](Self::reply_buffer);
     /// [`html`](Self::html), [`text`](Self::text), and [`bytes`](Self::bytes)
     /// take theirs as an argument.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx| {
+    ///         cx.status(202).set_header("content-type", "text/plain");
+    ///         cx.reply_buffer().extend_from_slice(b"queued");
+    ///         Ok(())
+    ///     }))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!((r.status, r.text()), (202, "queued"));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     pub fn status(&mut self, status: u16) -> &mut Self {
         self.out.status = status;
         self
@@ -461,6 +730,26 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// Adds a reply field. A name that is not a token, a value with a
     /// control character, or a framing field (`content-length`, ...) turns
     /// the reply into a 500 when the handler returns.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx| {
+    ///         cx.set_header("x-version", "7");
+    ///         cx.text(200, "ok")
+    ///     }))
+    ///     .route(get("/bad", |cx| {
+    ///         cx.set_header("content-length", "1"); // framing is serve-net's
+    ///         cx.text(200, "ok")
+    ///     }))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("x-version"), Some(&b"7"[..]));
+    /// let r = serve_net::testing::respond(&app, b"GET /bad HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.status, 500);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     pub fn set_header(&mut self, name: &str, value: impl AsRef<[u8]>) -> &mut Self {
         self.out.header(name, value.as_ref());
         self
@@ -475,7 +764,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// let app = App::builder()
     ///     .route(get("/logo.svg", |cx| cx.bytes(200, "image/svg+xml", b"<svg/>")))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET /logo.svg HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET /logo.svg HTTP/1.1\r\nHost: localhost\r\n\r\n");
     /// assert_eq!(r.header("content-type"), Some(&b"image/svg+xml"[..]));
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -499,7 +788,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// let app = App::builder()
     ///     .route(get("/", |cx| cx.html(200, "<h1>Hello</h1>")))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     /// assert_eq!((r.status, r.text()), (200, "<h1>Hello</h1>"));
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -517,7 +806,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// use web_net::{App, get};
     ///
     /// let app = App::builder().route(get("/", |cx| cx.text(200, "ok"))).build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     /// assert_eq!(r.text(), "ok");
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -545,7 +834,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     ///         Ok(())
     ///     }))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     /// assert_eq!(r.text(), "1 + 2 = 3");
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -567,7 +856,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     ///         _ => cx.html(200, "<p>hi</p>"),
     ///     }))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\nAccept: application/json\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\r\n");
     /// assert_eq!(r.text(), "{}");
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -590,7 +879,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     ///         cx.text(200, lang)
     ///     }))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\nAccept-Language: fr-CA, en;q=0.5\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Language: fr-CA, en;q=0.5\r\n\r\n");
     /// assert_eq!(r.text(), "fr");
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -612,7 +901,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     ///         cx.text(200, "ok")
     ///     }))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     /// assert!(r.header("set-cookie").is_some());
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -642,7 +931,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     ///         cx.html(200, "<h1>page</h1>")
     ///     }))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"rev-7\"\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"rev-7\"\r\n\r\n");
     /// assert_eq!(r.status, 304);
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -672,12 +961,66 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
         }
     }
 
-    /// The site-relative `path` as a URL path: the site's base path in
-    /// front (`/blog` + `/posts/1`). Every link a page writes goes through
-    /// this, so the site works installed in a folder.
+    /// The site path `path` as a URL path: the site's base path in front
+    /// (`/blog` + `/posts/1`), so the site works installed in a folder.
+    /// `path` is used as it is (a query and a fragment included); for a
+    /// path built from a visitor's input, use [`url_path`](Self::url_path),
+    /// which encodes each segment.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .base("/blog")
+    ///     .route(get("/", |cx| {
+    ///         let about = cx.url("/about")?;
+    ///         cx.html(200, &format!("<a href=\"{about}\">about</a>"))
+    ///     }))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /blog/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "<a href=\"/blog/about\">about</a>");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// 500 `url.not_local` when `path` is not a path of this site: it must
+    /// start with one `/` (never `//` or `/\`, which browsers read as
+    /// another host) and hold only visible ASCII.
+    pub fn url(&self, path: &str) -> Result<String> {
+        if !is_local_target(path) {
+            return Err(Error::internal("url.not_local"));
+        }
+        Ok(site_url(&self.shared.base, path))
+    }
+
+    /// A URL path from segments, each percent-encoded as a path segment, the
+    /// base path in front: `["tags", tag]` gives `/blog/tags/a%2Fb` for the
+    /// tag `a/b`. A segment cannot add a path level, a query, a fragment, or
+    /// another host (`/`, `?`, `#`, `%`, and spaces are encoded; characters a
+    /// path segment allows, such as `&` and `+`, stay).
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx| cx.text(200, &cx.url_path(&["tags", "c# & c++"]))))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "/tags/c%23%20&%20c++");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
-    pub fn url(&self, path: &str) -> String {
-        site_url(&self.shared.base, path)
+    pub fn url_path(&self, segments: &[&str]) -> String {
+        let mut out = String::from(&*self.shared.base);
+        for s in segments {
+            out.push('/');
+            url::encode_segment(s.as_bytes(), &mut out);
+        }
+        if out.is_empty() || segments.is_empty() {
+            out.push('/');
+        }
+        out
     }
 
     /// The page a sign-in redirect asked for: the `next` query parameter
@@ -697,7 +1040,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     ///         cx.text(200, &next)
     ///     }))
     ///     .build()?;
-    /// let at = |q: &str| serve_net::testing::respond(&app, format!("GET /app/login?{q} HTTP/1.1\r\nHost: a\r\n\r\n").as_bytes()).text().to_owned();
+    /// let at = |q: &str| serve_net::testing::respond(&app, format!("GET /app/login?{q} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes()).text().to_owned();
     /// assert_eq!(at("next=/app/account%3Ftab%3D2"), "/account?tab=2");
     /// assert_eq!(at("next=//evil.example"), "/");
     /// assert_eq!(at("next=/elsewhere"), "/");
@@ -728,6 +1071,21 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// A redirect to another site, only to a host listed with
     /// [`Builder::redirect_hosts`](crate::Builder::redirect_hosts):
     /// `https://` (or `http://`), the host, and a visible-ASCII rest.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .redirect_hosts(&["docs.example.com"])
+    ///     .route(get("/docs", |cx| cx.redirect_external(302, "https://docs.example.com/start")))
+    ///     .route(get("/away", |cx| cx.redirect_external(302, "https://elsewhere.example/")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /docs HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("location"), Some(&b"https://docs.example.com/start"[..]));
+    /// let r = serve_net::testing::respond(&app, b"GET /away HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.status, 500);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -779,7 +1137,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     ///     .base("/app")
     ///     .route(post("/contact", |cx| cx.redirect(303, "/thanks")).csrf_exempt("example"))
     ///     .build()?;
-    /// let r = serve_net::testing::respond(&app, b"POST /app/contact HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\n\r\n");
+    /// let r = serve_net::testing::respond(&app, b"POST /app/contact HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
     /// assert_eq!((r.status, r.header("location")), (303, Some(&b"/app/thanks"[..])));
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -798,7 +1156,7 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
         if !is_local_target(path) {
             return Err(Error::internal("redirect.not_local"));
         }
-        let location = self.url(path);
+        let location = site_url(&self.shared.base, path);
         self.out.header("location", location.as_bytes());
         self.out.status = status;
         self.out.body.clear();
@@ -809,6 +1167,31 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// [`Route::template`](crate::Route::template)) against `view` into the
     /// body. The status stays as set (200 by default); `content-type` is
     /// HTML unless the handler set one.
+    ///
+    /// ```
+    /// use web_net::{App, Context, Guest, Output, Render, RenderError, TemplateId, get};
+    ///
+    /// struct Page<'a> { title: &'a str }
+    /// struct Pages;
+    /// impl Render for Pages {
+    ///     type View<'a> = Page<'a>;
+    ///     fn template(&self, name: &str) -> Option<TemplateId> {
+    ///         (name == "page").then_some(TemplateId(0))
+    ///     }
+    ///     fn render(&self, _: TemplateId, page: &Page<'_>, out: &mut Output<'_>) -> Result<(), RenderError> {
+    ///         out.write_str(page.title) // a real engine escapes
+    ///     }
+    /// }
+    ///
+    /// let app = App::builder()
+    ///     .render(Pages)
+    ///     .route(get("/", |cx: &mut Context<'_, Guest, Pages>| cx.render(&Page { title: "Home" })).template("page"))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "Home");
+    /// assert_eq!(r.header("content-type"), Some(&b"text/html; charset=utf-8"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -825,6 +1208,30 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     /// Renders the template `name` against `view`. The name is resolved by
     /// the engine on every call; prefer [`render`](Self::render) with a
     /// template declared on the route, resolved once at build.
+    ///
+    /// ```
+    /// use web_net::{App, Context, Guest, Output, Render, RenderError, TemplateId, get};
+    ///
+    /// struct Page<'a> { title: &'a str }
+    /// struct Pages;
+    /// impl Render for Pages {
+    ///     type View<'a> = Page<'a>;
+    ///     fn template(&self, name: &str) -> Option<TemplateId> {
+    ///         (name == "page").then_some(TemplateId(0))
+    ///     }
+    ///     fn render(&self, _: TemplateId, page: &Page<'_>, out: &mut Output<'_>) -> Result<(), RenderError> {
+    ///         out.write_str(page.title) // a real engine escapes
+    ///     }
+    /// }
+    ///
+    /// let app = App::builder()
+    ///     .render(Pages)
+    ///     .route(get("/", |cx: &mut Context<'_, Guest, Pages>| cx.render_named("page", &Page { title: "Named" })))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "Named");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -858,7 +1265,15 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
         if let Some(cp) = &self.shared.checkpoint {
             match cp.check(self.req.env, Stage::BeforeRender) {
                 Verdict::Pass => {}
-                Verdict::Deny { status } => return Err(Error::new(status, "checkpoint.denied")),
+                Verdict::Deny { status } => {
+                    // As at the authorized stage: an error status, or 403.
+                    let status = if (400..=599).contains(&status) {
+                        status
+                    } else {
+                        403
+                    };
+                    return Err(Error::new(status, "checkpoint.denied"));
+                }
                 _ => return Err(Error::forbidden("checkpoint.killed")),
             }
         }
@@ -879,13 +1294,36 @@ impl<'r, I, E: Render> Cx<'r, I, E> {
     }
 }
 
-impl<I, E> Cx<'_, I, E>
+impl<I, E> Context<'_, I, E>
 where
     E: for<'a> Render<View<'a> = dyn View + 'a>,
 {
     /// [`render`](Self::render) for an engine that reads any [`View`] (a
     /// dynamic engine): takes `&dyn View`, so a [`Fields`](crate::Fields)
     /// or any view of yours goes in as it is.
+    ///
+    /// ```
+    /// use web_net::{App, Fields, Output, Render, RenderError, TemplateId, Value, View, get};
+    ///
+    /// /// Writes the view's `title` field.
+    /// struct Echo;
+    /// impl Render for Echo {
+    ///     type View<'a> = dyn View + 'a;
+    ///     fn template(&self, _: &str) -> Option<TemplateId> { Some(TemplateId(0)) }
+    ///     fn render(&self, _: TemplateId, view: &dyn View, out: &mut Output<'_>) -> Result<(), RenderError> {
+    ///         let key = view.shape().key("title").ok_or(RenderError::new("echo.no_title"))?;
+    ///         out.write_str(view.get(key).as_text().unwrap_or("")) // a real engine escapes
+    ///     }
+    /// }
+    ///
+    /// let app = App::builder()
+    ///     .render(Echo)
+    ///     .route(get("/", |cx| cx.render_view(&Fields(&[("title", Value::Text("Home"))]))).template("page"))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "Home");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     ///
     /// # Errors
     ///
@@ -897,6 +1335,29 @@ where
     /// [`render_named`](Self::render_named) for an engine that reads any
     /// [`View`].
     ///
+    /// ```
+    /// use web_net::{App, Fields, Output, Render, RenderError, TemplateId, Value, View, get};
+    ///
+    /// /// Writes the view's `title` field.
+    /// struct Echo;
+    /// impl Render for Echo {
+    ///     type View<'a> = dyn View + 'a;
+    ///     fn template(&self, _: &str) -> Option<TemplateId> { Some(TemplateId(0)) }
+    ///     fn render(&self, _: TemplateId, view: &dyn View, out: &mut Output<'_>) -> Result<(), RenderError> {
+    ///         let key = view.shape().key("title").ok_or(RenderError::new("echo.no_title"))?;
+    ///         out.write_str(view.get(key).as_text().unwrap_or("")) // a real engine escapes
+    ///     }
+    /// }
+    ///
+    /// let app = App::builder()
+    ///     .render(Echo)
+    ///     .route(get("/", |cx| cx.render_view_named("page", &Fields(&[("title", Value::Text("Named"))]))))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "Named");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// As [`render`](Self::render).
@@ -905,9 +1366,9 @@ where
     }
 }
 
-impl<I, E: Render> fmt::Debug for Cx<'_, I, E> {
+impl<I, E: Render> fmt::Debug for Context<'_, I, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Cx")
+        f.debug_struct("Context")
             .field("request", &self.req)
             .field("status", &self.out.status)
             .finish_non_exhaustive()

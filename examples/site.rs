@@ -14,9 +14,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use web_net::csrf_sec::{Csrf, OsPads, PadSource};
+use web_net::csrf_sec::{Csrf, OsRandom, RandomSource};
 use web_net::form_net::{self, Store};
-use web_net::{App, Assets, Cx, Denial, Error, Gate, Identity, Request, Route, get, post};
+use web_net::{App, Assets, Context, Denial, Error, Gate, Identity, Request, Route, get, post};
 
 // ---------------------------------------------------------------- the gate
 
@@ -52,7 +52,7 @@ struct Sessions {
 
 fn random_id() -> Result<String, Error> {
     let mut b = [0u8; 24];
-    OsPads
+    OsRandom
         .fill(&mut b)
         .map_err(|e| Error::internal("site.random").with_source(e))?;
     Ok(b.iter().fold(String::with_capacity(48), |mut s, x| {
@@ -140,7 +140,7 @@ fn engine() -> luminess::Engine<Page> {
 }
 
 fn render(
-    cx: &mut Cx<'_, Visitor>,
+    cx: &mut Context<'_, Visitor>,
     engine: &luminess::Engine<Page>,
     name: &str,
     message: &str,
@@ -176,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A real site loads a persisted key; a fresh one per start means every
     // open form fails after a restart.
     let mut key = [0u8; 32];
-    OsPads.fill(&mut key)?;
+    OsRandom.fill(&mut key)?;
 
     let app = App::with_gate(sessions)
         .host("127.0.0.1:8092")
@@ -186,15 +186,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .assets(Assets::new("/static", public))
         .health("/healthz")
         .route(
-            get("/", |cx: &mut Cx<'_, Visitor>| {
+            get("/", |cx: &mut Context<'_, Visitor>| {
                 render(cx, engine, "home", "")
             })
             .public(),
         )
         .route(
             Route::at("/login")
-                .get(|cx: &mut Cx<'_, Visitor>| render(cx, engine, "login", ""))
-                .post(move |cx: &mut Cx<'_, Visitor>| {
+                .get(|cx: &mut Context<'_, Visitor>| render(cx, engine, "login", ""))
+                .post(move |cx: &mut Context<'_, Visitor>| {
                     let form: Login = cx.form()?;
                     if form.user == "demo" && form.password.expose() == "demo" {
                         let sid = random_id()?;
@@ -213,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .public(),
         )
         .route(
-            post("/logout", move |cx: &mut Cx<'_, Visitor>| {
+            post("/logout", move |cx: &mut Context<'_, Visitor>| {
                 let id = cx.identity().id.clone();
                 if let Ok(mut m) = sessions.by_id.lock() {
                     let _ = m.remove(&id);
@@ -224,13 +224,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .public(),
         )
         .route(
-            get("/account", |cx: &mut Cx<'_, Visitor>| {
+            get("/account", |cx: &mut Context<'_, Visitor>| {
                 render(cx, engine, "account", "")
             })
             .allow(Rule::SignedIn),
         )
         .route(
-            post("/account/avatar", move |cx: &mut Cx<'_, Visitor>| {
+            post("/account/avatar", move |cx: &mut Context<'_, Visitor>| {
                 let upload = cx.upload(store)?;
                 let n = upload.files("avatar").count();
                 render(cx, engine, "account", &format!("Received {n} file(s)."))

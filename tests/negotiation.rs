@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use serve_net::testing::{TestReply, respond};
 use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
 use web_net::{
-    App, CachePolicy, Cacheable, Compression, Cors, Cx, Denial, Gate, Group, Hook, Identity,
+    App, CachePolicy, Cacheable, Compression, Context, Cors, Denial, Gate, Group, Hook, Identity,
     Output, Render, RenderError, Request, Routes, Served, TemplateId, Value, View, get, post,
 };
 
@@ -28,7 +28,7 @@ fn test_json_error_replies() {
         .unwrap();
     let r = send(
         &app,
-        "GET /nope HTTP/1.1\r\nHost: a\r\nAccept: application/json",
+        "GET /nope HTTP/1.1\r\nHost: localhost\r\nAccept: application/json",
     );
     assert_eq!(r.status, 404);
     assert_eq!(h(&r, "content-type"), "application/json");
@@ -40,10 +40,10 @@ fn test_json_error_replies() {
     );
     let r = send(
         &app,
-        "GET /nope HTTP/1.1\r\nHost: a\r\nAccept: text/html, application/json;q=0.5",
+        "GET /nope HTTP/1.1\r\nHost: localhost\r\nAccept: text/html, application/json;q=0.5",
     );
     assert_eq!(h(&r, "content-type"), "text/html; charset=utf-8");
-    let r = send(&app, "GET /nope HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET /nope HTTP/1.1\r\nHost: localhost");
     assert_eq!(h(&r, "content-type"), "text/html; charset=utf-8");
 }
 
@@ -62,10 +62,10 @@ fn test_language_and_media() {
         .unwrap();
     let r = send(
         &app,
-        "GET / HTTP/1.1\r\nHost: a\r\nAccept-Language: fr-CA, en;q=0.5\r\nAccept: application/json",
+        "GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Language: fr-CA, en;q=0.5\r\nAccept: application/json",
     );
     assert_eq!(r.text(), "fr application/json");
-    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: localhost");
     assert_eq!(r.text(), "en text/html");
 }
 
@@ -94,7 +94,7 @@ fn test_cors_preflight() {
     let app = api();
     let r = send(
         &app,
-        "OPTIONS /api/items HTTP/1.1\r\nHost: a\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: Content-Type",
+        "OPTIONS /api/items HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: Content-Type",
     );
     assert_eq!(r.status, 204);
     assert_eq!(h(&r, "access-control-allow-origin"), "https://app.example");
@@ -111,7 +111,7 @@ fn test_cors_preflight() {
     ] {
         let r = send(
             &app,
-            &format!("OPTIONS /api/items HTTP/1.1\r\nHost: a\r\n{bad}"),
+            &format!("OPTIONS /api/items HTTP/1.1\r\nHost: localhost\r\n{bad}"),
         );
         assert_eq!(r.status, 204, "{bad}");
         assert_eq!(h(&r, "access-control-allow-origin"), "", "{bad}");
@@ -119,7 +119,7 @@ fn test_cors_preflight() {
     // A route without a policy answers no preflight.
     let r = send(
         &app,
-        "OPTIONS /private HTTP/1.1\r\nHost: a\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: GET",
+        "OPTIONS /private HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: GET",
     );
     assert_eq!(h(&r, "access-control-allow-origin"), "");
 }
@@ -129,13 +129,13 @@ fn test_cors_actual_replies() {
     let app = api();
     let r = send(
         &app,
-        "GET /api/items HTTP/1.1\r\nHost: a\r\nOrigin: https://app.example",
+        "GET /api/items HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example",
     );
     assert_eq!(h(&r, "access-control-allow-origin"), "https://app.example");
     assert_eq!(h(&r, "access-control-allow-credentials"), "true");
     let r = send(
         &app,
-        "GET /api/items HTTP/1.1\r\nHost: a\r\nOrigin: https://evil.example",
+        "GET /api/items HTTP/1.1\r\nHost: localhost\r\nOrigin: https://evil.example",
     );
     assert_eq!(
         (h(&r, "access-control-allow-origin"), h(&r, "vary")),
@@ -143,7 +143,7 @@ fn test_cors_actual_replies() {
     );
     let r = send(
         &app,
-        "GET /private HTTP/1.1\r\nHost: a\r\nOrigin: https://app.example",
+        "GET /private HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example",
     );
     assert_eq!(h(&r, "access-control-allow-origin"), "");
 }
@@ -165,12 +165,12 @@ fn test_preflight_lists_only_methods_under_the_policy() {
         .unwrap();
     let r = send(
         &app,
-        "OPTIONS /items HTTP/1.1\r\nHost: a\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: GET",
+        "OPTIONS /items HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: GET",
     );
     assert_eq!(h(&r, "access-control-allow-methods"), "GET, HEAD");
     let r = send(
         &app,
-        "OPTIONS /items HTTP/1.1\r\nHost: a\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: DELETE",
+        "OPTIONS /items HTTP/1.1\r\nHost: localhost\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: DELETE",
     );
     assert_eq!(h(&r, "access-control-allow-origin"), "");
 }
@@ -201,7 +201,7 @@ fn test_compression() {
         .unwrap();
     let r = send(
         &app,
-        "GET / HTTP/1.1\r\nHost: a\r\nAccept-Encoding: gzip, br",
+        "GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip, br",
     );
     assert_eq!(
         (h(&r, "content-encoding"), h(&r, "vary")),
@@ -213,24 +213,24 @@ fn test_compression() {
         "<p>hello, compressible world</p>".repeat(100).as_bytes()
     );
     assert!(r.body.len() < 400);
-    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: localhost");
     assert_eq!(
         (h(&r, "content-encoding"), h(&r, "vary")),
         ("", "accept-encoding")
     );
     let r = send(
         &app,
-        "GET / HTTP/1.1\r\nHost: a\r\nAccept-Encoding: gzip;q=0",
+        "GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip;q=0",
     );
     assert_eq!(h(&r, "content-encoding"), "");
     let r = send(
         &app,
-        "GET /small HTTP/1.1\r\nHost: a\r\nAccept-Encoding: gzip",
+        "GET /small HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip",
     );
     assert_eq!(h(&r, "content-encoding"), "");
     let r = send(
         &app,
-        "GET /png HTTP/1.1\r\nHost: a\r\nAccept-Encoding: gzip",
+        "GET /png HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip",
     );
     assert_eq!((h(&r, "content-encoding"), h(&r, "vary")), ("", ""));
 }
@@ -278,12 +278,12 @@ fn test_cache_policy_and_report() {
     let front = Front {
         app: App::with_gate(CookieGate)
             .route(
-                get("/news", |cx: &mut Cx<'_, Member>| cx.text(200, "news"))
+                get("/news", |cx: &mut Context<'_, Member>| cx.text(200, "news"))
                     .public()
                     .cache(CachePolicy::Guests { max_age: 120 }),
             )
             .route(
-                get("/cookie", |cx: &mut Cx<'_, Member>| {
+                get("/cookie", |cx: &mut Context<'_, Member>| {
                     cx.set_header("set-cookie", "a=1");
                     cx.text(200, "c")
                 })
@@ -291,12 +291,12 @@ fn test_cache_policy_and_report() {
                 .cache(CachePolicy::Guests { max_age: 120 }),
             )
             .route(
-                get("/me", |cx: &mut Cx<'_, Member>| cx.text(200, "me"))
+                get("/me", |cx: &mut Context<'_, Member>| cx.text(200, "me"))
                     .public()
                     .cache(CachePolicy::NoStore),
             )
             .route(
-                get("/own", |cx: &mut Cx<'_, Member>| {
+                get("/own", |cx: &mut Context<'_, Member>| {
                     cx.set_header("cache-control", "max-age=5");
                     cx.text(200, "own")
                 })
@@ -307,18 +307,21 @@ fn test_cache_policy_and_report() {
             .unwrap(),
         seen: Mutex::new(Vec::new()),
     };
-    let r = send(&front, "GET /news HTTP/1.1\r\nHost: a");
+    let r = send(&front, "GET /news HTTP/1.1\r\nHost: localhost");
     assert_eq!(h(&r, "cache-control"), "public, max-age=120");
-    let r = send(&front, "GET /news HTTP/1.1\r\nHost: a\r\nCookie: sid=x");
+    let r = send(
+        &front,
+        "GET /news HTTP/1.1\r\nHost: localhost\r\nCookie: sid=x",
+    );
     assert_eq!(h(&r, "cache-control"), "private, no-store");
     // A reply with a cookie is never public, whatever the policy says.
-    let r = send(&front, "GET /cookie HTTP/1.1\r\nHost: a");
+    let r = send(&front, "GET /cookie HTTP/1.1\r\nHost: localhost");
     assert_eq!(h(&r, "cache-control"), "private, no-store");
-    let r = send(&front, "GET /me HTTP/1.1\r\nHost: a");
+    let r = send(&front, "GET /me HTTP/1.1\r\nHost: localhost");
     assert_eq!(h(&r, "cache-control"), "no-store");
-    let r = send(&front, "GET /own HTTP/1.1\r\nHost: a");
+    let r = send(&front, "GET /own HTTP/1.1\r\nHost: localhost");
     assert_eq!(h(&r, "cache-control"), "max-age=5");
-    let _ = send(&front, "GET /missing HTTP/1.1\r\nHost: a");
+    let _ = send(&front, "GET /missing HTTP/1.1\r\nHost: localhost");
     let seen = front.seen.lock().unwrap();
     let caches: Vec<Cacheable> = seen.iter().map(|s| s.cache).collect();
     assert_eq!(
@@ -382,7 +385,7 @@ fn test_before_render_hook() {
         )
         .build()
         .unwrap();
-    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: localhost");
     assert_eq!((r.text(), h(&r, "x-rendered")), ("A:t", "1"));
 }
 
@@ -390,9 +393,11 @@ fn test_before_render_hook() {
 fn test_sites_pick_by_host_and_base() {
     let mk = |host: Option<&str>, base: &str, text: &'static str| {
         let mut b = App::builder();
-        if let Some(h) = host {
-            b = b.host(h);
-        }
+        b = match host {
+            Some(h) => b.host(h),
+            // The fallback answers any host, as a catch-all must say.
+            None => b.any_host(),
+        };
         b.base(base)
             .route(get("/", move |cx| cx.text(200, text)).public())
             .build()
@@ -429,6 +434,6 @@ fn test_sites_lowercase_site_claims_its_upper_case_paths() {
         .build()
         .unwrap();
     let sites = web_net::Sites::new().site(main).site(blog);
-    let r = send(&sites, "GET /BLOG/X HTTP/1.1\r\nHost: a");
+    let r = send(&sites, "GET /BLOG/X HTTP/1.1\r\nHost: localhost");
     assert_eq!((r.status, h(&r, "location")), (301, "/blog/x"));
 }

@@ -19,9 +19,9 @@ fn test_open_gate_route_without_access_is_public() {
         .route(get("/posts/:slug", |cx| cx.text(200, &cx.param("slug")?)))
         .build()
         .unwrap();
-    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: localhost");
     assert_eq!((r.status, r.text()), (200, "<h1>Hello</h1>"));
-    let r = send(&app, "GET /posts/caf%C3%A9 HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET /posts/caf%C3%A9 HTTP/1.1\r\nHost: localhost");
     assert_eq!((r.status, r.text()), (200, "café"));
 }
 
@@ -59,7 +59,10 @@ fn test_param_unknown_name_is_500() {
         .route(get("/posts/:slug", |cx| cx.text(200, &cx.param("id")?)))
         .build()
         .unwrap();
-    assert_eq!(send(&app, "GET /posts/a HTTP/1.1\r\nHost: a").status, 500);
+    assert_eq!(
+        send(&app, "GET /posts/a HTTP/1.1\r\nHost: localhost").status,
+        500
+    );
 }
 
 #[test]
@@ -75,9 +78,18 @@ fn test_param_as_bad_value_is_404_unknown_name_is_500() {
         }))
         .build()
         .unwrap();
-    assert_eq!(send(&app, "GET /u/7 HTTP/1.1\r\nHost: a").text(), "7");
-    assert_eq!(send(&app, "GET /u/x HTTP/1.1\r\nHost: a").status, 404);
-    assert_eq!(send(&app, "GET /v/7 HTTP/1.1\r\nHost: a").status, 500);
+    assert_eq!(
+        send(&app, "GET /u/7 HTTP/1.1\r\nHost: localhost").text(),
+        "7"
+    );
+    assert_eq!(
+        send(&app, "GET /u/x HTTP/1.1\r\nHost: localhost").status,
+        404
+    );
+    assert_eq!(
+        send(&app, "GET /v/7 HTTP/1.1\r\nHost: localhost").status,
+        500
+    );
 }
 
 #[test]
@@ -90,11 +102,11 @@ fn test_bytes_sets_status_type_and_body() {
         }))
         .build()
         .unwrap();
-    let r = send(&app, "GET /a HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET /a HTTP/1.1\r\nHost: localhost");
     assert_eq!(r.status, 201);
     assert_eq!(r.header("content-type"), Some(&b"image/png"[..]));
     assert_eq!(r.body, [1, 2, 3]);
-    let r = send(&app, "GET /b HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET /b HTTP/1.1\r\nHost: localhost");
     assert_eq!(r.header("content-type"), Some(&b"application/x-mine"[..]));
 }
 
@@ -107,7 +119,7 @@ fn test_writers_end_a_handler_and_chain_with_question_mark() {
         }))
         .build()
         .unwrap();
-    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: localhost");
     assert_eq!((r.status, r.text()), (404, "<p>second wins</p>"));
     // The first writer set text/plain; a later writer does not add a second
     // content-type.
@@ -123,7 +135,10 @@ fn test_redirect_303_after_post() {
         .route(post("/f", |cx| cx.redirect(303, "/done")).csrf_exempt("test"))
         .build()
         .unwrap();
-    let r = send(&app, "POST /f HTTP/1.1\r\nHost: a\r\nContent-Length: 0");
+    let r = send(
+        &app,
+        "POST /f HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0",
+    );
     assert_eq!((r.status, r.header("location")), (303, Some(&b"/done"[..])));
 }
 
@@ -139,7 +154,7 @@ fn test_accept_and_accept_language() {
         .unwrap();
     let r = send(
         &app,
-        "GET / HTTP/1.1\r\nHost: a\r\nAccept: application/json\r\nAccept-Language: de",
+        "GET / HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nAccept-Language: de",
     );
     assert_eq!(r.text(), "application/json de");
 }
@@ -149,7 +164,7 @@ fn get_over_tcp(addr: std::net::SocketAddr, path: &str) -> String {
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     write!(
         s,
-        "GET {path} HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
     )
     .unwrap();
     let mut out = String::new();
@@ -212,7 +227,7 @@ fn test_unavailable_gate_answers_503_with_retry_after() {
         .route(get("/", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
-    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: localhost");
     assert_eq!(r.status, 503);
     assert_eq!(r.header("retry-after"), Some(&b"5"[..]));
     assert_eq!(r.header("cache-control"), Some(&b"no-store"[..]));
@@ -222,6 +237,6 @@ fn test_unavailable_gate_answers_503_with_retry_after() {
         .route(get("/", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
-    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: localhost");
     assert_eq!((r.status, r.header("retry-after")), (403, None));
 }

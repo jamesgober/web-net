@@ -7,6 +7,17 @@ use crate::RouteId;
 
 /// How a route's pages may be cached. Applied as `Cache-Control` unless the
 /// handler set one itself.
+///
+/// ```
+/// use web_net::{App, CachePolicy, get};
+///
+/// let app = App::builder()
+///     .route(get("/", |cx| cx.text(200, "home")).cache(CachePolicy::Private { max_age: 60 }))
+///     .build()?;
+/// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.header("cache-control"), Some(&b"private, max-age=60"[..]));
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CachePolicy {
@@ -50,6 +61,28 @@ impl CachePolicy {
 }
 
 /// Whether a cache in front of web-net may keep this reply for guests.
+///
+/// ```
+/// use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
+/// use web_net::{App, CachePolicy, Cacheable, get};
+///
+/// // A caching front that reads the report.
+/// struct Front(App);
+/// impl HttpService for Front {
+///     fn call(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
+///         let served = self.0.respond(req, env, None, reply);
+///         assert_eq!(served.cache, Cacheable::Guests { max_age: 30 });
+///         served.outcome
+///     }
+/// }
+///
+/// let app = App::builder()
+///     .route(get("/", |cx| cx.text(200, "hi")).cache(CachePolicy::Guests { max_age: 30 }))
+///     .build()?;
+/// let r = serve_net::testing::respond(&Front(app), b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.text(), "hi");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Cacheable {
@@ -67,6 +100,25 @@ pub enum Cacheable {
 }
 
 /// What [`App::respond`](crate::App::respond) reports with the outcome.
+///
+/// ```
+/// use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
+/// use web_net::{App, Cacheable, RouteId, get};
+///
+/// struct Front(App);
+/// impl HttpService for Front {
+///     fn call(&self, req: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
+///         let served = self.0.respond(req, env, None, reply);
+///         assert_eq!((served.route, served.cache), (Some(RouteId(0)), Cacheable::No));
+///         served.outcome
+///     }
+/// }
+///
+/// let app = App::builder().route(get("/", |cx| cx.text(200, "hi"))).build()?;
+/// let r = serve_net::testing::respond(&Front(app), b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.text(), "hi");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Served {
@@ -85,6 +137,21 @@ pub struct Served {
 /// leak the secrets (BREACH). csrf-sec masks its tokens per response, which
 /// is the defence for them; other secrets in compressed pages are the
 /// application's to consider.
+///
+/// ```
+/// use web_net::{App, Compression, get};
+///
+/// let app = App::builder()
+///     .compress(Compression::default().min_bytes(512).level(6))
+///     .route(get("/", |cx| cx.text(200, &"hello ".repeat(200))))
+///     .build()?;
+/// let r = serve_net::testing::respond(
+///     &app,
+///     b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\n\r\n",
+/// );
+/// assert_eq!(r.header("content-encoding"), Some(&b"gzip"[..]));
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Compression {
     pub(crate) min_bytes: usize,
@@ -102,6 +169,22 @@ impl Default for Compression {
 
 impl Compression {
     /// Bodies smaller than this are sent as they are (default 1024).
+    ///
+    /// ```
+    /// use web_net::{App, Compression, get};
+    ///
+    /// // A 600-byte page is under the minimum, so it goes out as it is.
+    /// let app = App::builder()
+    ///     .compress(Compression::default().min_bytes(4096))
+    ///     .route(get("/", |cx| cx.text(200, &"hello ".repeat(100))))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(
+    ///     &app,
+    ///     b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\n\r\n",
+    /// );
+    /// assert_eq!(r.header("content-encoding"), None);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn min_bytes(mut self, bytes: usize) -> Self {
         self.min_bytes = bytes;
@@ -109,6 +192,22 @@ impl Compression {
     }
 
     /// The level, 1 (fastest) to 9 (smallest); default 6.
+    ///
+    /// ```
+    /// use web_net::{App, Compression, get};
+    ///
+    /// // Fastest; values outside 1 to 9 are clamped.
+    /// let app = App::builder()
+    ///     .compress(Compression::default().level(1))
+    ///     .route(get("/", |cx| cx.text(200, &"hello ".repeat(400))))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(
+    ///     &app,
+    ///     b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\n\r\n",
+    /// );
+    /// assert_eq!(r.header("content-encoding"), Some(&b"gzip"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn level(mut self, level: u8) -> Self {
         self.level = level.clamp(1, 9);

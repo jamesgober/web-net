@@ -32,6 +32,14 @@ pub struct Error {
 
 impl Error {
     /// An error with `status` (400 to 599; anything else is treated as 500).
+    ///
+    /// ```
+    /// use web_net::Error;
+    ///
+    /// assert_eq!(Error::new(429, "rate.limited").status(), 429);
+    /// // A status outside 400 to 599 is treated as 500.
+    /// assert_eq!(Error::new(200, "not.an.error").status(), 500);
+    /// ```
     #[must_use]
     pub fn new(status: u16, code: &'static str) -> Self {
         let status = if (400..=599).contains(&status) {
@@ -47,24 +55,50 @@ impl Error {
     }
 
     /// 400 Bad Request.
+    ///
+    /// ```
+    /// let e = web_net::Error::bad_request("search.no_query");
+    /// assert_eq!((e.status(), e.code()), (400, "search.no_query"));
+    /// ```
     #[must_use]
     pub fn bad_request(code: &'static str) -> Self {
         Self::new(400, code)
     }
 
     /// 403 Forbidden.
+    ///
+    /// ```
+    /// use web_net::{App, Error, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/admin", |_cx| Err(Error::forbidden("admin.closed"))))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /admin HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.status, 403);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn forbidden(code: &'static str) -> Self {
         Self::new(403, code)
     }
 
     /// 404 Not Found.
+    ///
+    /// ```
+    /// let e = web_net::Error::not_found("blog.no_post");
+    /// assert_eq!((e.status(), e.code()), (404, "blog.no_post"));
+    /// ```
     #[must_use]
     pub fn not_found(code: &'static str) -> Self {
         Self::new(404, code)
     }
 
     /// 409 Conflict.
+    ///
+    /// ```
+    /// let e = web_net::Error::conflict("user.name_taken");
+    /// assert_eq!((e.status(), e.code()), (409, "user.name_taken"));
+    /// ```
     #[must_use]
     pub fn conflict(code: &'static str) -> Self {
         Self::new(409, code)
@@ -72,24 +106,47 @@ impl Error {
 
     /// 422 Unprocessable Content: the request was understood and refused
     /// (a form with errors).
+    ///
+    /// ```
+    /// let e = web_net::Error::unprocessable("signup.weak_password");
+    /// assert_eq!((e.status(), e.code()), (422, "signup.weak_password"));
+    /// ```
     #[must_use]
     pub fn unprocessable(code: &'static str) -> Self {
         Self::new(422, code)
     }
 
     /// 500 Internal Server Error: our fault, not the visitor's.
+    ///
+    /// ```
+    /// let e = web_net::Error::internal("report.parse");
+    /// assert_eq!((e.status(), e.code()), (500, "report.parse"));
+    /// ```
     #[must_use]
     pub fn internal(code: &'static str) -> Self {
         Self::new(500, code)
     }
 
     /// 503 Service Unavailable.
+    ///
+    /// ```
+    /// let e = web_net::Error::unavailable("db.down");
+    /// assert_eq!((e.status(), e.code()), (503, "db.down"));
+    /// ```
     #[must_use]
     pub fn unavailable(code: &'static str) -> Self {
         Self::new(503, code)
     }
 
     /// Keeps `source` for the logs.
+    ///
+    /// ```
+    /// use web_net::Error;
+    ///
+    /// let io = std::io::Error::other("no such file");
+    /// let e = Error::internal("config.read").with_source(io);
+    /// assert_eq!(e.source_ref().map(|s| s.to_string()), Some("no such file".to_owned()));
+    /// ```
     #[must_use]
     pub fn with_source(mut self, source: impl Into<Source>) -> Self {
         self.source = Some(source.into());
@@ -97,18 +154,34 @@ impl Error {
     }
 
     /// The status.
+    ///
+    /// ```
+    /// assert_eq!(web_net::Error::conflict("cart.changed").status(), 409);
+    /// ```
     #[must_use]
     pub const fn status(&self) -> u16 {
         self.status
     }
 
     /// The code.
+    ///
+    /// ```
+    /// assert_eq!(web_net::Error::not_found("blog.no_post").code(), "blog.no_post");
+    /// ```
     #[must_use]
     pub const fn code(&self) -> &'static str {
         self.code
     }
 
     /// The source, if one was kept.
+    ///
+    /// ```
+    /// use web_net::Error;
+    ///
+    /// assert!(Error::internal("x").source_ref().is_none());
+    /// let e = Error::internal("x").with_source(std::io::Error::other("disk gone"));
+    /// assert!(e.source_ref().is_some());
+    /// ```
     #[must_use]
     pub fn source_ref(&self) -> Option<&(dyn std::error::Error + Send + Sync + 'static)> {
         self.source.as_deref()
@@ -163,9 +236,33 @@ impl From<crate::RenderError> for Error {
 }
 
 /// The handler result.
+///
+/// ```
+/// use web_net::{App, Context, Error, Guest, Result, get};
+///
+/// fn show(cx: &mut Context<'_, Guest>) -> Result {
+///     let id: u32 = cx.param_as("id")?;
+///     if id == 0 {
+///         return Err(Error::not_found("post.none"));
+///     }
+///     cx.text(200, "a post")
+/// }
+///
+/// let app = App::builder().route(get("/posts/:id", show)).build()?;
+/// let r = serve_net::testing::respond(&app, b"GET /posts/0 HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.status, 404);
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 pub type Result<T = (), E = Error> = std::result::Result<T, E>;
 
 /// One thing wrong with an application's declaration.
+///
+/// ```
+/// let err = web_net::App::builder().base("blog").build().unwrap_err();
+/// let p = &err.problems()[0];
+/// assert_eq!(p.subject, "base");
+/// assert!(p.message.contains("/blog"));
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Problem {
@@ -177,6 +274,11 @@ pub struct Problem {
 
 /// Why [`Builder::build`](crate::Builder::build) refused: every problem
 /// found, not only the first.
+///
+/// ```
+/// let err = web_net::App::builder().base("blog").https_only().build().unwrap_err();
+/// assert!(err.to_string().starts_with("the application has 2 problem(s)"));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildError {
     problems: Vec<Problem>,
@@ -188,6 +290,13 @@ impl BuildError {
     }
 
     /// The problems, in declaration order.
+    ///
+    /// ```
+    /// let err = web_net::App::builder().base("blog").https_only().build().unwrap_err();
+    /// let subjects: Vec<&str> = err.problems().iter().map(|p| p.subject.as_str()).collect();
+    /// assert_eq!(subjects.len(), 2);
+    /// assert!(subjects.contains(&"base"));
+    /// ```
     #[must_use]
     pub fn problems(&self) -> &[Problem] {
         &self.problems

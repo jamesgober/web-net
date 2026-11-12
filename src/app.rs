@@ -24,15 +24,32 @@ use crate::route::{Access, BoxHandler, Group, Route};
 use crate::router::{self, Captures, Trie};
 use crate::url::{self, TrailingSlash};
 use crate::{
-    Cx, Denial, DenialKind, ErrorPage, Event, EventKind, Events, Gate, Identity, NoEvents,
+    Context, Denial, DenialKind, ErrorPage, Event, EventKind, Events, Gate, Identity, NoEvents,
     NoRender, Open, Output, Render, Request, RequestId, Result, Stage, TemplateId,
 };
 
 /// The default budget for one rendered page.
+///
+/// ```
+/// assert_eq!(web_net::DEFAULT_PAGE_LIMIT, 8 * 1024 * 1024);
+/// ```
 pub const DEFAULT_PAGE_LIMIT: usize = 8 << 20;
 
 /// A named point in the pipeline where registered code runs, only for the
 /// routes it registered for. A route with no hooks pays nothing.
+///
+/// ```
+/// use web_net::{App, Error, Hook, Routes, get};
+///
+/// // A `Routed` hook runs before the handler; its error ends the request.
+/// let app = App::builder()
+///     .hook(Hook::Routed, Routes::prefix("/beta"), |_cx| Err(Error::forbidden("beta.closed")))
+///     .route(get("/beta/news", |cx| cx.text(200, "news")))
+///     .build()?;
+/// let r = serve_net::testing::respond(&app, b"GET /beta/news HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.status, 403);
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hook {
@@ -42,12 +59,21 @@ pub enum Hook {
     /// After the handler succeeded, before the reply leaves: add headers.
     /// An error replaces the reply with the error page.
     Finish,
-    /// Inside [`Cx::render`], before the engine runs: choose a variant, add
+    /// Inside [`Context::render`], before the engine runs: choose a variant, add
     /// headers. A hook that renders does not run these hooks again.
     BeforeRender,
 }
 
 /// Which routes a hook runs for.
+///
+/// ```
+/// use web_net::Routes;
+///
+/// let every = Routes::all();
+/// let blog = Routes::prefix("/blog");
+/// let pages = Routes::named(&["home", "about"]);
+/// # let _ = (every, blog, pages);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Routes(Selector);
 
@@ -60,18 +86,68 @@ enum Selector {
 
 impl Routes {
     /// Every route.
+    ///
+    /// ```
+    /// use web_net::{App, Hook, Routes, get};
+    ///
+    /// let app = App::builder()
+    ///     .hook(Hook::Finish, Routes::all(), |cx| {
+    ///         cx.set_header("x-site", "demo");
+    ///         Ok(())
+    ///     })
+    ///     .route(get("/", |cx| cx.text(200, "home")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("x-site"), Some(&b"demo"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn all() -> Self {
         Self(Selector::All)
     }
 
     /// Routes whose pattern starts with `prefix` (`/blog`).
+    ///
+    /// ```
+    /// use serve_net::testing::respond;
+    /// use web_net::{App, Hook, Routes, get};
+    ///
+    /// let app = App::builder()
+    ///     .hook(Hook::Finish, Routes::prefix("/docs"), |cx| {
+    ///         cx.set_header("x-section", "docs");
+    ///         Ok(())
+    ///     })
+    ///     .route(get("/docs/intro", |cx| cx.text(200, "intro")))
+    ///     .route(get("/docsearch", |cx| cx.text(200, "search")))
+    ///     .build()?;
+    /// let r = respond(&app, b"GET /docs/intro HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("x-section"), Some(&b"docs"[..]));
+    /// // A prefix matches whole segments.
+    /// let r = respond(&app, b"GET /docsearch HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("x-section"), None);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn prefix(prefix: impl Into<String>) -> Self {
         Self(Selector::Prefix(prefix.into()))
     }
 
     /// Routes with one of these names.
+    ///
+    /// ```
+    /// use web_net::{App, Hook, Routes, get};
+    ///
+    /// let app = App::builder()
+    ///     .hook(Hook::Finish, Routes::named(&["home", "about"]), |cx| {
+    ///         cx.set_header("x-page", "static");
+    ///         Ok(())
+    ///     })
+    ///     .route(get("/", |cx| cx.text(200, "home")).name("home"))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("x-page"), Some(&b"static"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn named(names: &[&'static str]) -> Self {
         Self(Selector::Named(names.to_vec()))
@@ -92,9 +168,29 @@ impl Routes {
     }
 }
 
-pub(crate) type HookFn<I, E> = Arc<dyn Fn(&mut Cx<'_, I, E>) -> Result + Send + Sync>;
+pub(crate) type HookFn<I, E> = Arc<dyn Fn(&mut Context<'_, I, E>) -> Result + Send + Sync>;
 
 /// What [`App::classify`] tells a dispatcher before admission.
+///
+/// ```
+/// use web_net::{App, get};
+/// use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
+///
+/// // A dispatcher in front of the app that answers with what `classify` said.
+/// struct Probe(App);
+/// impl HttpService for Probe {
+///     fn call(&self, req: &HttpRequest<'_>, _: &Envelope, reply: &mut HttpReply) -> Outcome {
+///         let c = self.0.classify(req.head());
+///         reply.text(200, &format!("{:?} {:?}", c.route, c.work));
+///         Outcome::Done
+///     }
+/// }
+///
+/// let app = App::builder().route(get("/", |cx| cx.text(200, "hi"))).build()?;
+/// let r = serve_net::testing::respond(&Probe(app), b"GET /none HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.text(), "None Quick");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Classified {
@@ -106,6 +202,29 @@ pub struct Classified {
 
 /// A declared route (one method of one pattern), numbered in declaration
 /// order.
+///
+/// ```
+/// use web_net::{App, get};
+/// use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
+///
+/// // A dispatcher in front of the app that answers with what `classify` said.
+/// struct Probe(App);
+/// impl HttpService for Probe {
+///     fn call(&self, req: &HttpRequest<'_>, _: &Envelope, reply: &mut HttpReply) -> Outcome {
+///         let c = self.0.classify(req.head());
+///         reply.text(200, &format!("{:?} {:?}", c.route, c.work));
+///         Outcome::Done
+///     }
+/// }
+///
+/// let app = App::builder()
+///     .route(get("/", |cx| cx.text(200, "home")))
+///     .route(get("/about", |cx| cx.text(200, "about")))
+///     .build()?;
+/// let r = serve_net::testing::respond(&Probe(app), b"GET /about HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.text(), "Some(RouteId(1)) Quick");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RouteId(pub u32);
 
@@ -149,6 +268,9 @@ struct Site {
     hosts: Vec<Box<str>>,
     aliases: Vec<Box<str>>,
     development: bool,
+    /// Any `Host` is the site (`Builder::any_host`); without it and without
+    /// declared hosts, only development hosts are.
+    any_host: bool,
     slash: TrailingSlash,
     lowercase: bool,
     https_only: bool,
@@ -197,10 +319,10 @@ struct Endpoint {
 ///     }))
 ///     .build()?;
 ///
-/// let reply = serve_net::testing::respond(&app, b"GET /users/7 HTTP/1.1\r\nHost: a\r\n\r\n");
+/// let reply = serve_net::testing::respond(&app, b"GET /users/7 HTTP/1.1\r\nHost: localhost\r\n\r\n");
 /// assert_eq!((reply.status, reply.text()), (200, "user 7"));
 ///
-/// let reply = serve_net::testing::respond(&app, b"GET /users/7/ HTTP/1.1\r\nHost: a\r\n\r\n");
+/// let reply = serve_net::testing::respond(&app, b"GET /users/7/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
 /// assert_eq!(reply.status, 301);
 /// assert_eq!(reply.header("location"), Some(&b"/users/7"[..]));
 /// # Ok::<(), web_net::BuildError>(())
@@ -215,11 +337,21 @@ pub struct App<G: Gate = Open, E: Render = NoRender> {
     allow_all: Box<str>,
     assets: Vec<Assets>,
     health: Vec<(Box<str>, Health)>,
+    streams: assets::Streams,
 }
 
 impl App<Open> {
     /// A builder with the [`Open`] gate: every visitor is a guest and every
     /// route is public, so routes declare no access.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder().route(get("/", |cx| cx.text(200, "hi"))).build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!((r.status, r.text()), (200, "hi"));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn builder() -> Builder<Open> {
         Builder::new(Open)
@@ -230,6 +362,33 @@ impl<G: Gate> App<G> {
     /// A builder with `gate` for authentication and authorization. Every
     /// route then declares its access, [`public`](crate::Route::public) or
     /// [`allow(rule)`](crate::Route::allow), or the build fails.
+    ///
+    /// ```
+    /// use serve_net::testing::respond;
+    /// use web_net::{App, Denial, Gate, Guest, Request, get};
+    ///
+    /// enum Rule { Staff }
+    /// struct NoStaff;
+    /// impl Gate for NoStaff {
+    ///     type Identity = Guest;
+    ///     type Rule = Rule;
+    ///     fn authenticate(&self, _: &Request<'_>) -> Result<Guest, Denial> { Ok(Guest) }
+    ///     fn authorize(&self, _: &Guest, _: &Rule, _: &Request<'_>) -> Result<(), Denial> {
+    ///         Err(Denial::forbidden("staff.only"))
+    ///     }
+    /// }
+    ///
+    /// // A route that declares no access stops the build.
+    /// assert!(App::with_gate(NoStaff).route(get("/", |cx| cx.text(200, "hi"))).build().is_err());
+    ///
+    /// let app = App::with_gate(NoStaff)
+    ///     .route(get("/", |cx| cx.text(200, "hi")).public())
+    ///     .route(get("/admin", |cx| cx.text(200, "admin")).allow(Rule::Staff))
+    ///     .build()?;
+    /// assert_eq!(respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").status, 200);
+    /// assert_eq!(respond(&app, b"GET /admin HTTP/1.1\r\nHost: localhost\r\n\r\n").status, 403);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn with_gate(gate: G) -> Builder<G> {
         Builder::new(gate)
@@ -238,6 +397,20 @@ impl<G: Gate> App<G> {
 
 /// Declares an application. Every mistake is reported by
 /// [`build`](Self::build) at once, before anything listens.
+///
+/// ```
+/// use web_net::{App, get};
+///
+/// let app = App::builder()
+///     .host("example.com")
+///     .development()
+///     .health("/healthz")
+///     .route(get("/", |cx| cx.text(200, "home")))
+///     .build()?;
+/// let r = serve_net::testing::respond(&app, b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+/// assert_eq!(r.text(), "ok");
+/// # Ok::<(), web_net::BuildError>(())
+/// ```
 pub struct Builder<G: Gate, E: Render = NoRender> {
     gate: G,
     routes: Vec<Route<G::Identity, G::Rule, E>>,
@@ -289,6 +462,26 @@ impl<G: Gate, E: Render> Builder<G, E> {
     /// Compress replies with gzip when the client accepts it: HTML, CSS,
     /// JavaScript, JSON, XML, SVG, and other text, over a minimum size. Off
     /// by default: a proxy in front usually compresses.
+    ///
+    /// A compressed page that carries a secret beside text the visitor
+    /// chose (a reflected query value) can leak the secret through its
+    /// compressed size (BREACH). csrf-sec masks its tokens per reply; keep
+    /// compression off for pages with other secrets.
+    ///
+    /// ```
+    /// use web_net::{App, Compression, get};
+    ///
+    /// let app = App::builder()
+    ///     .compress(Compression::default())
+    ///     .route(get("/", |cx| cx.text(200, &"hello ".repeat(400))))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(
+    ///     &app,
+    ///     b"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\n\r\n",
+    /// );
+    /// assert_eq!(r.header("content-encoding"), Some(&b"gzip"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn compress(mut self, compression: Compression) -> Self {
         self.compression = Some(compression);
@@ -302,14 +495,43 @@ impl<G: Gate, E: Render> Builder<G, E> {
     ///
     /// web-net always applies the origin policy and a token, whatever the
     /// `Csrf`'s `Mode`; its keys, lifetimes, and allowed origins apply as set.
+    ///
+    /// ```
+    /// use web_net::{App, csrf_sec::Csrf, get, post};
+    ///
+    /// let app = App::builder()
+    ///     .csrf(Csrf::new(*b"a persisted 32-byte secret key!!").unwrap())
+    ///     .route(get("/", |cx| cx.text(200, "form")))
+    ///     .route(post("/", |cx| cx.redirect(303, "/")))
+    ///     .build()?;
+    /// // A POST without a token is refused before its handler runs.
+    /// let r = serve_net::testing::respond(
+    ///     &app,
+    ///     b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+    /// );
+    /// assert_eq!(r.status, 403);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn csrf(mut self, csrf: csrf_sec::Csrf) -> Self {
         self.csrf = Some(csrf);
         self
     }
 
-    /// Hosts that [`Cx::redirect_external`] may send a visitor to
+    /// Hosts that [`Context::redirect_external`] may send a visitor to
     /// (`accounts.example.com`). Everything else is refused.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .redirect_hosts(&["accounts.example.com"])
+    ///     .route(get("/login", |cx| cx.redirect_external(302, "https://accounts.example.com/login")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /login HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("location"), Some(&b"https://accounts.example.com/login"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn redirect_hosts(mut self, hosts: &[&str]) -> Self {
         self.redirect_hosts.extend(
@@ -322,6 +544,19 @@ impl<G: Gate, E: Render> Builder<G, E> {
 
     /// Serves a folder of files under a mount path, before routing and
     /// without the gate (files are public).
+    ///
+    /// ```
+    /// use web_net::{App, Assets};
+    ///
+    /// let dir = std::env::temp_dir().join("web-net-doc-builder-assets");
+    /// std::fs::create_dir_all(&dir).unwrap();
+    /// std::fs::write(dir.join("hello.txt"), "hello").unwrap();
+    ///
+    /// let app = App::builder().assets(Assets::new("/static", &dir)).build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /static/hello.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!((r.status, r.text()), (200, "hello"));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn assets(mut self, assets: Assets) -> Self {
         self.assets.push(assets);
@@ -330,6 +565,13 @@ impl<G: Gate, E: Render> Builder<G, E> {
 
     /// A liveness path (`/healthz`): `200 ok` whenever the process answers.
     /// Answered before routing and without the gate.
+    ///
+    /// ```
+    /// let app = web_net::App::builder().health("/healthz").build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!((r.status, r.text()), (200, "ok"));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn health(mut self, path: &str) -> Self {
         self.health.push((path.to_owned(), Health::Live));
@@ -339,6 +581,23 @@ impl<G: Gate, E: Render> Builder<G, E> {
     /// A readiness path (`/readyz`): `200 ready` when `check` says so,
     /// `503 not ready` otherwise. Keep `check` to a flag read: it runs on the
     /// request path.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicBool, Ordering};
+    /// use serve_net::testing::respond;
+    ///
+    /// let up = Arc::new(AtomicBool::new(false));
+    /// let flag = Arc::clone(&up);
+    /// let app = web_net::App::builder()
+    ///     .ready("/readyz", move || flag.load(Ordering::Relaxed))
+    ///     .build()?;
+    /// let req = b"GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    /// assert_eq!(respond(&app, req).status, 503);
+    /// up.store(true, Ordering::Relaxed);
+    /// assert_eq!(respond(&app, req).text(), "ready");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn ready(mut self, path: &str, check: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         self.health
@@ -348,6 +607,19 @@ impl<G: Gate, E: Render> Builder<G, E> {
 
     /// The security headers every reply carries (default
     /// [`SecurityHeaders::default`]).
+    ///
+    /// ```
+    /// use web_net::{App, SecurityHeaders, get};
+    ///
+    /// // A proxy in front sets the security headers, so web-net sends none.
+    /// let app = App::builder()
+    ///     .security_headers(SecurityHeaders::none())
+    ///     .route(get("/", |cx| cx.html(200, "<p>hi</p>")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("content-security-policy"), None);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn security_headers(mut self, policy: SecurityHeaders) -> Self {
         self.security = policy;
@@ -355,6 +627,15 @@ impl<G: Gate, E: Render> Builder<G, E> {
     }
 
     /// Adds a route.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder().route(get("/about", |cx| cx.text(200, "about"))).build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /about HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "about");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn route(mut self, route: Route<G::Identity, G::Rule, E>) -> Self {
         self.routes.push(route);
@@ -362,6 +643,17 @@ impl<G: Gate, E: Render> Builder<G, E> {
     }
 
     /// Adds a group's routes.
+    ///
+    /// ```
+    /// use web_net::{App, Group, get};
+    ///
+    /// let app = App::builder()
+    ///     .group(Group::at("/admin").route(get("/users", |cx| cx.text(200, "users"))))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /admin/users HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "users");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn group(mut self, group: Group<G::Identity, G::Rule, E>) -> Self {
         self.routes.extend(group.into_routes());
@@ -369,18 +661,53 @@ impl<G: Gate, E: Render> Builder<G, E> {
     }
 
     /// Runs `f` at `hook` for the routes `routes` selects.
+    ///
+    /// ```
+    /// use web_net::{App, Hook, Routes, get};
+    ///
+    /// let app = App::builder()
+    ///     .hook(Hook::Finish, Routes::all(), |cx| {
+    ///         cx.set_header("x-served-by", "web-net");
+    ///         Ok(())
+    ///     })
+    ///     .route(get("/", |cx| cx.text(200, "home")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.header("x-served-by"), Some(&b"web-net"[..]));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn hook<F>(mut self, hook: Hook, routes: Routes, f: F) -> Self
     where
-        F: Fn(&mut Cx<'_, G::Identity, E>) -> Result + Send + Sync + 'static,
+        F: Fn(&mut Context<'_, G::Identity, E>) -> Result + Send + Sync + 'static,
     {
         self.hooks.push((hook, routes, Arc::new(f)));
         self
     }
 
     /// A host the site answers (`example.com`, or `localhost:8080` with its
-    /// port). The first one is canonical. With no host declared the site
-    /// answers any host; with hosts declared, any other host gets 421.
+    /// port). The first one is canonical; any other host gets 421.
+    ///
+    /// With no host declared, the site answers the development hosts only
+    /// (`localhost`, `127.0.0.1`, `[::1]`, `*.localhost`), so a site works
+    /// on a laptop as it is and a name someone else points at the server
+    /// (DNS rebinding) is never the site. Declare the production host before
+    /// deploying, or [`any_host`](Self::any_host) for a site that must
+    /// answer every name.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    /// use serve_net::testing::respond;
+    ///
+    /// let app = App::builder().route(get("/", |cx| cx.text(200, "hi"))).build()?;
+    /// assert_eq!(respond(&app, b"GET / HTTP/1.1\r\nHost: localhost:8080\r\n\r\n").status, 200);
+    /// assert_eq!(respond(&app, b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n").status, 421);
+    ///
+    /// let app = App::builder().host("example.com").route(get("/", |cx| cx.text(200, "hi"))).build()?;
+    /// assert_eq!(respond(&app, b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n").status, 200);
+    /// assert_eq!(respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").status, 421);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn host(mut self, host: &str) -> Self {
         self.site.hosts.push(host.to_ascii_lowercase().into());
@@ -389,25 +716,83 @@ impl<G: Gate, E: Render> Builder<G, E> {
 
     /// A host that is redirected (301, or 308 for unsafe methods) to the
     /// canonical host (`www.example.com` to `example.com`).
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .host("example.com")
+    ///     .alias("www.example.com")
+    ///     .route(get("/", |cx| cx.text(200, "home")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: www.example.com\r\n\r\n");
+    /// assert_eq!((r.status, r.header("location")), (301, Some(&b"http://example.com/"[..])));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn alias(mut self, host: &str) -> Self {
         self.site.aliases.push(host.to_ascii_lowercase().into());
         self
     }
 
-    /// A development instance: `localhost`, `127.0.0.1`, `[::1]`, and
-    /// `*.localhost` are answered as the site (with any port), and HTTPS is
-    /// not required for them. Never set this in production: it is the only
-    /// way a `Host: localhost` is trusted.
+    /// A development instance of a site with declared hosts: `localhost`,
+    /// `127.0.0.1`, `[::1]`, and `*.localhost` are answered as the site too
+    /// (with any port), and HTTPS is not required for them. Never set this
+    /// in production. (A site with no declared host answers only these
+    /// already.)
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .host("example.com")
+    ///     .development()
+    ///     .route(get("/", |cx| cx.text(200, "home")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost:8080\r\n\r\n");
+    /// assert_eq!(r.status, 200);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn development(mut self) -> Self {
         self.site.development = true;
         self
     }
 
+    /// Answers every `Host`, for a site behind a front that checked the
+    /// host already, or one that is reached by names it cannot list. Not
+    /// with [`host`](Self::host).
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder().any_host().route(get("/", |cx| cx.text(200, "hi"))).build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: anything.example\r\n\r\n");
+    /// assert_eq!(r.status, 200);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    #[must_use]
+    pub fn any_host(mut self) -> Self {
+        self.site.any_host = true;
+        self
+    }
+
     /// The path the site is installed under (`/blog`). It is removed before
-    /// routing and added back by [`Cx::url`], so routes and links are written
+    /// routing and added back by [`Context::url`], so routes and links are written
     /// as if the site were at `/`. Requests outside it get 404.
+    ///
+    /// ```
+    /// use serve_net::testing::respond;
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .base("/blog")
+    ///     .route(get("/posts", |cx| cx.text(200, "posts")))
+    ///     .build()?;
+    /// assert_eq!(respond(&app, b"GET /blog/posts HTTP/1.1\r\nHost: localhost\r\n\r\n").text(), "posts");
+    /// assert_eq!(respond(&app, b"GET /posts HTTP/1.1\r\nHost: localhost\r\n\r\n").status, 404);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn base(mut self, base: &str) -> Self {
         self.base = base.to_owned();
@@ -415,6 +800,19 @@ impl<G: Gate, E: Render> Builder<G, E> {
     }
 
     /// The trailing-slash policy (default [`TrailingSlash::Strip`]).
+    ///
+    /// ```
+    /// use web_net::{App, TrailingSlash, get};
+    ///
+    /// // Both spellings reach the route and neither is redirected.
+    /// let app = App::builder()
+    ///     .trailing_slash(TrailingSlash::Ignore)
+    ///     .route(get("/docs", |cx| cx.text(200, "docs")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /docs/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!((r.status, r.text()), (200, "docs"));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn trailing_slash(mut self, policy: TrailingSlash) -> Self {
         self.site.slash = policy;
@@ -422,6 +820,18 @@ impl<G: Gate, E: Render> Builder<G, E> {
     }
 
     /// Paths are lower case: one with an upper-case letter is redirected.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .lowercase_paths()
+    ///     .route(get("/about", |cx| cx.text(200, "about")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /About HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!((r.status, r.header("location")), (301, Some(&b"/about"[..])));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn lowercase_paths(mut self) -> Self {
         self.site.lowercase = true;
@@ -430,6 +840,19 @@ impl<G: Gate, E: Render> Builder<G, E> {
 
     /// Plain HTTP is redirected to HTTPS on the canonical host (behind a
     /// TLS proxy, serve-net must trust the proxy's scheme). Needs a host.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .host("example.com")
+    ///     .https_only()
+    ///     .route(get("/", |cx| cx.text(200, "home")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+    /// assert_eq!((r.status, r.header("location")), (301, Some(&b"https://example.com/"[..])));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn https_only(mut self) -> Self {
         self.site.https_only = true;
@@ -439,6 +862,30 @@ impl<G: Gate, E: Render> Builder<G, E> {
     /// The site-relative sign-in page. A [`Denial::sign_in`] on a `GET` or
     /// `HEAD` is then answered with a 303 to it, the page asked for passed
     /// as `next`; without it, or for other methods, the answer is 401.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    /// # use web_net::{Denial, Gate, Guest, Request};
+    /// # enum Rule { Member }
+    /// # struct Members;
+    /// # impl Gate for Members {
+    /// #     type Identity = Guest;
+    /// #     type Rule = Rule;
+    /// #     fn authenticate(&self, _: &Request<'_>) -> Result<Guest, Denial> { Ok(Guest) }
+    /// #     fn authorize(&self, _: &Guest, _: &Rule, _: &Request<'_>) -> Result<(), Denial> {
+    /// #         Err(Denial::sign_in("session.none"))
+    /// #     }
+    /// # }
+    /// // `Members` answers `Rule::Member` with `Denial::sign_in` for everyone.
+    /// let app = App::with_gate(Members)
+    ///     .sign_in("/login")
+    ///     .route(get("/login", |cx| cx.text(200, "sign in")).public())
+    ///     .route(get("/account", |cx| cx.text(200, "account")).allow(Rule::Member))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET /account HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!((r.status, r.header("location")), (303, Some(&b"/login?next=/account"[..])));
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn sign_in(mut self, path: &str) -> Self {
         self.sign_in = Some(path.to_owned());
@@ -458,6 +905,31 @@ impl<G: Gate, E: Render> Builder<G, E> {
     }
 
     /// Where refusals, denials, and failures are reported.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicU32, Ordering};
+    /// use web_net::{App, Error, Event, EventKind, Events, get};
+    ///
+    /// #[derive(Default)]
+    /// struct Failures(AtomicU32);
+    /// impl Events for Failures {
+    ///     fn event(&self, e: &Event<'_>) {
+    ///         if e.kind == EventKind::Failed {
+    ///             self.0.fetch_add(1, Ordering::Relaxed);
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// let failures = Arc::new(Failures::default());
+    /// let app = App::builder()
+    ///     .events(Arc::clone(&failures))
+    ///     .route(get("/", |_cx| Err(Error::unavailable("db.down"))))
+    ///     .build()?;
+    /// serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(failures.0.load(Ordering::Relaxed), 1);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn events(mut self, events: impl Events) -> Self {
         self.events = Box::new(events);
@@ -465,6 +937,26 @@ impl<G: Gate, E: Render> Builder<G, E> {
     }
 
     /// The in-flight revocation check at web-net's stages.
+    ///
+    /// ```
+    /// use serve_net::{Envelope, Verdict};
+    /// use web_net::{App, Checkpoint, Stage, get};
+    ///
+    /// struct Maintenance;
+    /// impl Checkpoint for Maintenance {
+    ///     fn check(&self, _: &Envelope, _: Stage) -> Verdict {
+    ///         Verdict::Deny { status: 503 }
+    ///     }
+    /// }
+    ///
+    /// let app = App::builder()
+    ///     .checkpoint(Maintenance)
+    ///     .route(get("/", |cx| cx.text(200, "hi")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.status, 503);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn checkpoint(mut self, checkpoint: impl crate::Checkpoint) -> Self {
         self.checkpoint = Some(Box::new(checkpoint));
@@ -472,6 +964,30 @@ impl<G: Gate, E: Render> Builder<G, E> {
     }
 
     /// The budget for one rendered page (default 8 MiB).
+    ///
+    /// ```
+    /// use web_net::{App, Context, Guest, get};
+    /// # use web_net::{Output, Render, RenderError, TemplateId};
+    /// # struct Pages;
+    /// # impl Render for Pages {
+    /// #     type View<'a> = str;
+    /// #     fn template(&self, name: &str) -> Option<TemplateId> {
+    /// #         (name == "page").then_some(TemplateId(0))
+    /// #     }
+    /// #     fn render(&self, _: TemplateId, text: &str, out: &mut Output<'_>) -> Result<(), RenderError> {
+    /// #         out.write_str(text)
+    /// #     }
+    /// # }
+    /// // `Pages` is an engine whose one template, "page", writes the view (a `str`).
+    /// let app = App::builder()
+    ///     .render(Pages)
+    ///     .page_limit(4)
+    ///     .route(get("/", |cx: &mut Context<'_, Guest, Pages>| cx.render("more than four bytes")).template("page"))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.status, 500);
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn page_limit(mut self, bytes: usize) -> Self {
         self.page_limit = bytes;
@@ -481,6 +997,18 @@ impl<G: Gate, E: Render> Builder<G, E> {
     /// Zero the reply buffers web-net reuses after every request, so one
     /// visitor's page never lingers in memory another request reuses. Costs
     /// one pass over the bytes written.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .wipe_buffers()
+    ///     .route(get("/", |cx| cx.text(200, "a private page")))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "a private page");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn wipe_buffers(mut self) -> Self {
         self.wipe = true;
@@ -494,6 +1022,21 @@ impl<G: Gate, E: Render> Builder<G, E> {
     /// A [`BuildError`] listing every problem: a route without declared
     /// access, a malformed pattern, two handlers for one method of one
     /// path, an unknown template, a malformed host or base path.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// assert!(App::builder().route(get("/", |cx| cx.text(200, "hi"))).build().is_ok());
+    ///
+    /// // Every problem is listed, not only the first.
+    /// let err = App::builder()
+    ///     .base("blog")
+    ///     .route(get("/a", |cx| cx.text(200, "a")))
+    ///     .route(get("/a", |cx| cx.text(200, "again")))
+    ///     .build()
+    ///     .unwrap_err();
+    /// assert_eq!(err.problems().len(), 2);
+    /// ```
     pub fn build(self) -> std::result::Result<App<G, E>, BuildError> {
         let mut problems = self.early;
         let mut problem = |subject: &str, message: String| {
@@ -518,6 +1061,12 @@ impl<G: Gate, E: Render> Builder<G, E> {
             if !valid_host(h) {
                 problem("host", format!("'{h}' is not a host name or address"));
             }
+        }
+        if self.site.any_host && !self.site.hosts.is_empty() {
+            problem(
+                "any_host",
+                "any_host() and host(..) contradict each other; keep one".into(),
+            );
         }
         if self.site.https_only && self.site.hosts.is_empty() {
             problem(
@@ -607,10 +1156,31 @@ impl<G: Gate, E: Render> Builder<G, E> {
                 problem(&r.pattern, "the route has no handler".into());
                 continue;
             }
+            // Request paths are lowered before routing, so a literal with an
+            // upper-case letter could never match.
+            if self.site.lowercase
+                && r.pattern
+                    .split('/')
+                    .filter(|s| !s.starts_with([':', '*']))
+                    .any(|s| s.bytes().any(|b| b.is_ascii_uppercase()))
+            {
+                problem(
+                    &r.pattern,
+                    "with lowercase_paths, request paths are lowered, so a literal must be lower case to match".into(),
+                );
+                continue;
+            }
             let mut access = r.access;
             if matches!(access, Access::Undeclared) && rules_impossible::<G::Rule>() {
                 // A gate without rules has only public routes.
                 access = Access::Public;
+            }
+            if matches!(access, Access::PublicInRuled) {
+                problem(
+                    &r.pattern,
+                    "the route is public inside a group with a rule; the group's rule holds for every route in it, so move the route out of the group".into(),
+                );
+                continue;
             }
             if matches!(access, Access::Undeclared) {
                 problem(
@@ -757,6 +1327,7 @@ impl<G: Gate, E: Render> Builder<G, E> {
             allow_all: String::from_utf8(v).unwrap_or_default().into(),
             assets,
             health,
+            streams: assets::Streams::default(),
         })
     }
 }
@@ -765,6 +1336,31 @@ impl<G: Gate> Builder<G, NoRender> {
     /// The template engine. Set it before adding routes and hooks: their
     /// handlers are typed by it, so any added before are dropped and the
     /// build says so.
+    ///
+    /// ```
+    /// use web_net::{App, Context, Guest, Output, Render, RenderError, TemplateId, get};
+    ///
+    /// struct Pages;
+    /// impl Render for Pages {
+    ///     type View<'a> = str;
+    ///     fn template(&self, name: &str) -> Option<TemplateId> {
+    ///         (name == "page").then_some(TemplateId(0))
+    ///     }
+    ///     fn render(&self, _: TemplateId, title: &str, out: &mut Output<'_>) -> Result<(), RenderError> {
+    ///         out.write_str("<h1>")?;
+    ///         out.write_str(title)?; // a real engine escapes
+    ///         out.write_str("</h1>")
+    ///     }
+    /// }
+    ///
+    /// let app = App::builder()
+    ///     .render(Pages)
+    ///     .route(get("/", |cx: &mut Context<'_, Guest, Pages>| cx.render("Home")).template("page"))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "<h1>Home</h1>");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn render<E: Render>(self, engine: E) -> Builder<G, E> {
         let mut b = Builder::new(self.gate);
@@ -920,6 +1516,12 @@ impl<G: Gate, E: Render> App<G, E> {
     /// The report says what ran and whether a cache in front may keep the
     /// reply for guests.
     ///
+    /// A wrapper forwards serve-net's `HttpService::done` to the app as
+    /// well (`HttpService::done(&app, env, finished)`): a large file sent in
+    /// parts keeps a record until its last part or until `done`, and records
+    /// of downloads the client dropped are freed only there. Without it they
+    /// accumulate until new large-file replies are refused with 503.
+    ///
     /// ```
     /// use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
     /// use web_net::{App, Guest, get};
@@ -933,7 +1535,7 @@ impl<G: Gate, E: Render> App<G, E> {
     /// }
     ///
     /// let front = Front(App::builder().route(get("/", |cx| cx.text(200, "hi"))).build()?);
-    /// let r = serve_net::testing::respond(&front, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    /// let r = serve_net::testing::respond(&front, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     /// assert_eq!(r.text(), "hi");
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
@@ -949,12 +1551,66 @@ impl<G: Gate, E: Render> App<G, E> {
             route: None,
             cache: Cacheable::No,
         };
-        report.outcome = self.run(req, env, who, reply, &mut report);
+        // Handlers and hooks are caught where they run; this catches the
+        // rest of the application's code on the request path (the gate, a
+        // checkpoint, a readiness check, identity methods). Whatever the
+        // reply held is discarded and the built-in 500 goes out instead.
+        match catch_unwind(AssertUnwindSafe(|| {
+            self.run(req, env, who, reply, &mut report)
+        })) {
+            Ok(outcome) => report.outcome = outcome,
+            Err(_) => {
+                *reply.parts_mut() = Default::default();
+                report = Served {
+                    outcome: Outcome::Done,
+                    route: None,
+                    cache: Cacheable::No,
+                };
+                let at = At {
+                    env,
+                    tls: self.tls(env, req.head().authority()),
+                    json: wants_json(req.header("accept")),
+                };
+                self.refuse_with(
+                    500,
+                    "pipeline.panic",
+                    EventKind::Panicked,
+                    None,
+                    None,
+                    at,
+                    reply,
+                    false,
+                );
+            }
+        }
         report
     }
 
     /// Looks at a head before admission: which route would run and how it
     /// behaves. Nothing is answered and no gate is called.
+    ///
+    /// ```
+    /// use serve_net::WorkClass;
+    /// use web_net::{App, get};
+    /// use serve_net::{Envelope, HttpReply, HttpRequest, HttpService, Outcome};
+    ///
+    /// // A dispatcher in front of the app that answers with what `classify` said.
+    /// struct Probe(App);
+    /// impl HttpService for Probe {
+    ///     fn call(&self, req: &HttpRequest<'_>, _: &Envelope, reply: &mut HttpReply) -> Outcome {
+    ///         let c = self.0.classify(req.head());
+    ///         reply.text(200, &format!("{:?} {:?}", c.route, c.work));
+    ///         Outcome::Done
+    ///     }
+    /// }
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/report", |cx| cx.text(200, "report")).work(WorkClass::Io))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&Probe(app), b"GET /report HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "Some(RouteId(0)) Io");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn classify(&self, head: &HttpHead<'_>) -> Classified {
         let none = Classified {
@@ -977,7 +1633,51 @@ impl<G: Gate, E: Render> App<G, E> {
         }
     }
 
+    /// `Ok` when `who` may use at least one method of the endpoint (one is
+    /// public, or every rule of one allows); else the first denial.
+    fn may_use_any<'r>(
+        &'r self,
+        endpoint: &Endpoint,
+        who: &G::Identity,
+        req: &mut Request<'r>,
+    ) -> std::result::Result<(), Denial> {
+        let mut first = None;
+        for i in endpoint.methods.iter().flatten() {
+            let entry = &self.entries[*i as usize];
+            let rules = match &entry.access {
+                Access::Rules(rules) => rules,
+                _ => return Ok(()),
+            };
+            req.route = Some(&entry.pattern);
+            match rules
+                .iter()
+                .try_for_each(|r| self.gate.authorize(who, r, req))
+            {
+                Ok(()) => return Ok(()),
+                Err(d) => {
+                    first.get_or_insert(d);
+                }
+            }
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// What a request held once it is over, for `HttpService::done`.
+    pub(crate) fn forget(&self, env: &Envelope) {
+        self.streams
+            .remove((env.connection().get(), env.seq().get()));
+    }
+
     /// The gate.
+    ///
+    /// ```
+    /// use web_net::{App, Open};
+    ///
+    /// let app = App::builder().build()?;
+    /// let gate: &Open = app.gate();
+    /// # let _ = gate;
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
     #[must_use]
     pub fn gate(&self) -> &G {
         &self.gate
@@ -1007,7 +1707,14 @@ impl<G: Gate, E: Render> App<G, E> {
         let authority = authority.unwrap_or("");
         let (full, host_only) = host_parts(authority);
         let listed = |list: &[Box<str>]| host_listed(list, full, host_only);
-        let dev = site.development && is_dev_host(host_only);
+        // With no host declared, the development hosts are the site, and no
+        // other: a name rebound to this address by someone else's DNS is
+        // not (DNS rebinding), unless the site said `any_host`.
+        let dev_only = site.hosts.is_empty() && !site.any_host;
+        let dev = (site.development || dev_only) && is_dev_host(host_only);
+        if dev_only && !dev {
+            return Placed::Refuse(421, "host.unknown", None);
+        }
         let mut target_host: Option<&str> = None;
         // With hosts declared, an empty or missing Host is as unknown as any
         // other host.
@@ -1234,6 +1941,13 @@ impl<G: Gate, E: Render> App<G, E> {
         };
         let endpoint = &self.endpoints[ep as usize];
         let Some(idx) = self.entry_for(ep as usize, method) else {
+            // The method answers (405, `OPTIONS`) say the path exists, so
+            // they go only to someone who may use one of its methods: a
+            // route the gate hides reads as missing for every method.
+            if let Err(d) = self.may_use_any(endpoint, who, &mut req) {
+                self.deny(d, &req, reply);
+                return Outcome::Done;
+            }
             if method == Method::Options {
                 reply.status(204).header("allow", endpoint.allow.as_bytes());
                 self.secure(reply, at.tls, |_| false);
@@ -1255,17 +1969,26 @@ impl<G: Gate, E: Render> App<G, E> {
         req.route = Some(&entry.pattern);
         report.route = Some(RouteId(idx));
 
-        // Authorization.
-        if let Access::Rule(rule) = &entry.access {
-            if let Err(d) = self.gate.authorize(who, rule, &req) {
-                self.deny(d, &req, reply);
-                return Outcome::Done;
+        // Authorization: every rule, the groups' first.
+        if let Access::Rules(rules) = &entry.access {
+            for rule in rules {
+                if let Err(d) = self.gate.authorize(who, rule, &req) {
+                    self.deny(d, &req, reply);
+                    return Outcome::Done;
+                }
             }
         }
         if let Some(cp) = &self.shared.checkpoint {
             match cp.check(env, Stage::Authorized) {
                 Verdict::Pass => {}
                 Verdict::Deny { status } => {
+                    // A refusal is an error status, whatever the checkpoint
+                    // said: anything else is answered as 403.
+                    let status = if (400..=599).contains(&status) {
+                        status
+                    } else {
+                        403
+                    };
                     self.refuse(
                         status,
                         "checkpoint.denied",
@@ -1428,13 +2151,14 @@ impl<G: Gate, E: Render> App<G, E> {
             self.not_get(method, at, reply);
             return Some(Outcome::Done);
         }
-        let found = assets::find(assets, rel, http.header("accept-encoding"));
         let key = (at.env.connection().get(), at.env.seq().get());
-        if let Some(tag) = assets::continuing(key) {
-            // A later part of a large file: the same file, or the end of
-            // the connection; never another reply inside this one.
-            return Some(assets::next_part(key, &tag, found.as_ref(), http, reply));
+        if let Some(stream) = self.streams.take(key) {
+            // A later part of a large file: the file found for the first
+            // part, unchanged, or the end of the connection; never another
+            // reply inside this one.
+            return Some(assets::next_part(&self.streams, key, stream, reply));
         }
+        let found = assets::find(assets, rel, http.header("accept-encoding"));
         let Some(found) = found else {
             self.refuse(
                 404,
@@ -1447,20 +2171,39 @@ impl<G: Gate, E: Render> App<G, E> {
             );
             return Some(Outcome::Done);
         };
-        let Some(outcome) = assets::serve(assets, &found, key, http, reply) else {
-            self.refuse(
-                500,
-                "assets.unreadable",
-                EventKind::Failed,
-                None,
-                None,
-                at,
-                reply,
-            );
-            return Some(Outcome::Done);
-        };
-        self.secure(reply, at.tls, |_| false);
-        Some(outcome)
+        match assets::serve(assets, &found, &self.streams, key, http, reply) {
+            Ok(outcome) => {
+                self.secure(reply, at.tls, |_| false);
+                Some(outcome)
+            }
+            Err(assets::Unserved::Busy) => {
+                // Every slot holds a download in progress: refused cleanly,
+                // never by forgetting one of them.
+                self.refuse(
+                    503,
+                    "assets.busy",
+                    EventKind::Refused,
+                    None,
+                    None,
+                    at,
+                    reply,
+                );
+                reply.header("retry-after", "5");
+                Some(Outcome::Done)
+            }
+            Err(assets::Unserved::Unreadable) => {
+                self.refuse(
+                    500,
+                    "assets.unreadable",
+                    EventKind::Failed,
+                    None,
+                    None,
+                    at,
+                    reply,
+                );
+                Some(Outcome::Done)
+            }
+        }
     }
 
     /// 405 (or 204 for `OPTIONS`) on a path that takes `GET` and `HEAD` only.
@@ -1502,7 +2245,7 @@ impl<G: Gate, E: Render> App<G, E> {
         let http = req.http;
         let guest = who.is_guest();
         let result = {
-            let mut cx = Cx {
+            let mut cx = Context {
                 req,
                 who,
                 caps,
@@ -1702,14 +2445,16 @@ impl<G: Gate, E: Render> App<G, E> {
         code: &'static str,
         source: Option<&(dyn std::error::Error + 'static)>,
     ) {
-        self.shared.events.event(&Event {
+        let event = Event {
             kind,
             id: RequestId::of(env),
             route,
             status,
             code,
             source,
-        });
+        };
+        // A sink that panics loses its event, never the visitor's reply.
+        let _ = catch_unwind(AssertUnwindSafe(|| self.shared.events.event(&event)));
     }
 
     /// The one function every refusal and error goes through: the status,
@@ -1726,6 +2471,24 @@ impl<G: Gate, E: Render> App<G, E> {
         at: At<'_>,
         reply: &mut HttpReply,
     ) {
+        self.refuse_with(status, code, kind, route, source, at, reply, true);
+    }
+
+    /// [`refuse`](Self::refuse); `engine` false gives the built-in page
+    /// without asking the engine (after a panic, the engine may be what
+    /// failed).
+    #[allow(clippy::too_many_arguments)]
+    fn refuse_with(
+        &self,
+        status: u16,
+        code: &'static str,
+        kind: EventKind,
+        route: Option<&str>,
+        source: Option<&(dyn std::error::Error + 'static)>,
+        at: At<'_>,
+        reply: &mut HttpReply,
+        engine: bool,
+    ) {
         self.event(kind, at.env, route, status, code, source);
         let reference = RequestId::of(at.env).to_string();
         let mut body = Vec::with_capacity(512);
@@ -1741,7 +2504,7 @@ impl<G: Gate, E: Render> App<G, E> {
             return;
         }
         let mut done = false;
-        if let Some(engine) = self.shared.render.as_ref() {
+        if let Some(engine) = self.shared.render.as_ref().filter(|_| engine) {
             let page = ErrorPage {
                 status,
                 title: error::title(status),
@@ -1749,12 +2512,25 @@ impl<G: Gate, E: Render> App<G, E> {
                 reference: &reference,
                 base: &self.shared.base,
             };
-            let mut out = Output::new(&mut body, self.shared.page_limit);
-            let wrote = engine.error_page(&page, &mut out);
-            if matches!(wrote, Ok(true)) && !out.over() {
-                done = true;
-            } else {
-                body.clear();
+            let wrote = catch_unwind(AssertUnwindSafe(|| {
+                let mut out = Output::new(&mut body, self.shared.page_limit);
+                let wrote = engine.error_page(&page, &mut out);
+                matches!(wrote, Ok(true)) && !out.over()
+            }));
+            match wrote {
+                Ok(true) => done = true,
+                Ok(false) => body.clear(),
+                Err(_) => {
+                    body.clear();
+                    self.event(
+                        EventKind::Panicked,
+                        at.env,
+                        route,
+                        status,
+                        "render.error_page_panic",
+                        None,
+                    );
+                }
             }
         }
         if !done {
@@ -1785,8 +2561,14 @@ impl<G: Gate, E: Render> App<G, E> {
     pub(crate) fn claim(&self, authority: Option<&str>, path: &str) -> Option<(u8, usize)> {
         let (full, host_only) = host_parts(authority.unwrap_or(""));
         let listed = |list: &[Box<str>]| host_listed(list, full, host_only);
-        let rank = if self.site.hosts.is_empty() {
+        let rank = if self.site.hosts.is_empty() && self.site.any_host {
             0
+        } else if self.site.hosts.is_empty() {
+            if is_dev_host(host_only) {
+                1
+            } else {
+                return None;
+            }
         } else if listed(&self.site.hosts) || listed(&self.site.aliases) {
             2
         } else if self.site.development && is_dev_host(host_only) {
@@ -1824,6 +2606,12 @@ impl<G: Gate, E: Render> App<G, E> {
 impl<G: Gate, E: Render> HttpService for App<G, E> {
     fn call(&self, request: &HttpRequest<'_>, env: &Envelope, reply: &mut HttpReply) -> Outcome {
         self.respond(request, env, None, reply).outcome
+    }
+
+    /// Frees what the request held: the record of a large file going out
+    /// in parts, when the client left before its end.
+    fn done(&self, env: &Envelope, _finished: &serve_net::Finished) {
+        self.forget(env);
     }
 }
 
@@ -1880,8 +2668,22 @@ fn compress(c: Compression, accept_encoding: Option<&[u8]>, out: &mut Out) {
     if !out.get("content-type").is_some_and(compressible) {
         return;
     }
-    if !out.has("vary") {
-        out.header("vary", b"accept-encoding");
+    // The handler's own `Vary` keeps its names and gains this one, so a
+    // cache keyed on them never hands a compressed body to a client that
+    // did not accept it.
+    match out.get("vary") {
+        None => out.header("vary", b"accept-encoding"),
+        Some(v) => {
+            let named = v == b"*"
+                || v.split(|&b| b == b',')
+                    .any(|t| t.trim_ascii().eq_ignore_ascii_case(b"accept-encoding"));
+            if !named {
+                let mut joined = v.to_vec();
+                joined.extend_from_slice(b", accept-encoding");
+                out.remove("vary");
+                out.header("vary", &joined);
+            }
+        }
     }
     let accepts = accept_encoding
         .and_then(|v| parse_net::best_encoding(Some(v), &["gzip", "identity"]))

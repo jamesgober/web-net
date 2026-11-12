@@ -60,6 +60,7 @@ App::builder()
 | S-13 | `docs/API.md` listed signatures as pseudo-code that never compiled, so it could drift. | Rewritten as a task-oriented reference; every block compiles as a doctest, the README's too. |
 | S-14 | An `Events` sink the application also reads (a counter) needed a hand-written impl on `&'static T`; the orphan rule ruled out `Arc<T>`. | `Events` and `Checkpoint` are implemented for `Arc<T>`: `.events(Arc::clone(&sink))`. |
 | S-15 | An error page of a site installed in a folder could not link its stylesheet: `ErrorPage` had no base path, and only the router knew it. (Found by a gateway building a site under `/blog/`.) | `ErrorPage::base` (`""` or `/blog`) and `ErrorPage::url(path)`, as `Cx::url` for pages; `with_base` for an engine's tests. Additive: `ErrorPage` is `#[non_exhaustive]` and `ErrorPage::new` is unchanged. |
+| S-16 | `Cx`, the type every handler names, is an abbreviation a newcomer has to decode. | `Context`. Closures keep the short variable name `cx`, as Rust code names a context. |
 
 ## Kept, with the reason
 

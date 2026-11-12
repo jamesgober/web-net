@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use serve_net::testing::{TestReply, TestRequest, respond};
 use serve_net::{Envelope, Scheme, Verdict};
 use web_net::{
-    App, Checkpoint, Cx, Denial, Error, ErrorPage, Event, EventKind, Events, Gate, Group, Hook,
-    Identity, Output, Render, RenderError, Request, Route, Routes, Stage, TemplateId,
+    App, Checkpoint, Context, Denial, Error, ErrorPage, Event, EventKind, Events, Gate, Group,
+    Hook, Identity, Output, Render, RenderError, Request, Route, Routes, Stage, TemplateId,
     TrailingSlash, Value, View, get, post,
 };
 
@@ -17,7 +17,10 @@ fn req(app: &impl serve_net::HttpService, raw: &str) -> TestReply {
 }
 
 fn get_req(app: &impl serve_net::HttpService, path: &str) -> TestReply {
-    req(app, &format!("GET {path} HTTP/1.1\r\nHost: a.test\r\n\r\n"))
+    req(
+        app,
+        &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+    )
 }
 
 fn loc(r: &TestReply) -> &str {
@@ -76,23 +79,23 @@ fn test_routes_and_params() {
 #[test]
 fn test_method_rules() {
     let app = hello();
-    let r = req(&app, "DELETE /form HTTP/1.1\r\nHost: a\r\n\r\n");
+    let r = req(&app, "DELETE /form HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(r.status, 405);
     assert_eq!(r.header("allow"), Some(&b"GET, HEAD, POST, OPTIONS"[..]));
 
-    let r = req(&app, "OPTIONS /form HTTP/1.1\r\nHost: a\r\n\r\n");
+    let r = req(&app, "OPTIONS /form HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(r.status, 204);
     assert_eq!(r.header("allow"), Some(&b"GET, HEAD, POST, OPTIONS"[..]));
 
-    let r = req(&app, "OPTIONS * HTTP/1.1\r\nHost: a\r\n\r\n");
+    let r = req(&app, "OPTIONS * HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(r.status, 204);
 
-    let r = req(&app, "BREW /form HTTP/1.1\r\nHost: a\r\n\r\n");
+    let r = req(&app, "BREW /form HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(r.status, 501);
 
     let r = req(
         &app,
-        "POST /form HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\n\r\n",
+        "POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
     );
     assert_eq!((r.status, loc(&r)), (303, "/form/done"));
 }
@@ -101,7 +104,7 @@ fn test_method_rules() {
 fn test_head_follows_get_without_body() {
     let app = hello();
     let g = get_req(&app, "/");
-    let h = req(&app, "HEAD / HTTP/1.1\r\nHost: a\r\n\r\n");
+    let h = req(&app, "HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(h.status, 200);
     assert!(h.body.is_empty(), "HEAD carries no body");
     assert_eq!(h.header("content-length"), g.header("content-length"));
@@ -134,7 +137,7 @@ fn test_canonical_redirects() {
     }
     let r = req(
         &app,
-        "POST /form/ HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\n\r\n",
+        "POST /form/ HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
     );
     assert_eq!((r.status, loc(&r)), (308, "/form"));
 }
@@ -189,7 +192,7 @@ fn site() -> App {
         .host("example.com")
         .alias("www.example.com")
         .base("/blog")
-        .route(get("/", |cx| cx.text(200, &cx.url("/"))).public())
+        .route(get("/", |cx| cx.text(200, &cx.url("/")?)).public())
         .route(get("/post", |cx| cx.redirect(303, "/")).public())
         .build()
         .unwrap()
@@ -323,14 +326,14 @@ fn gated(log: &'static Log) -> App<Demo> {
     .sign_in("/login")
     .events(log)
     .route(
-        get("/", |cx: &mut Cx<'_, User>| {
+        get("/", |cx: &mut Context<'_, User>| {
             let who = cx.identity().name;
             cx.text(200, if who.is_empty() { "guest" } else { who })
         })
         .public(),
     )
     .route(
-        get("/account", |cx: &mut Cx<'_, User>| {
+        get("/account", |cx: &mut Context<'_, User>| {
             cx.text(200, cx.identity().name)
         })
         .allow(Rule::SignedIn),
@@ -343,9 +346,11 @@ fn gated(log: &'static Log) -> App<Demo> {
     .group(
         Group::at("/admin")
             .allow(Rule::Admin)
-            .route(get("/", |cx| cx.text(200, "panel")))
-            .route(get("/open", |cx| cx.text(200, "open")).public()),
+            .route(get("/", |cx| cx.text(200, "panel"))),
     )
+    // A public page under the admin path lives outside the admin group: the
+    // group's rule holds for every route in it.
+    .route(get("/admin/open", |cx| cx.text(200, "open")).public())
     .route(get("/secret", |cx| cx.text(200, "x")).allow(Rule::Hidden))
     .build()
     .unwrap()
@@ -357,7 +362,9 @@ fn as_user(app: &App<Demo>, method: &str, path: &str, sid: Option<&str>) -> Test
         .unwrap_or_default();
     req(
         app,
-        &format!("{method} {path} HTTP/1.1\r\nHost: a\r\nContent-Length: 0\r\n{cookie}\r\n"),
+        &format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n{cookie}\r\n"
+        ),
     )
 }
 
@@ -378,14 +385,21 @@ fn test_gate_authenticates_and_authorizes() {
     assert_eq!(as_user(&app, "GET", "/", Some("banned")).status, 403);
     let r = req(
         &app,
-        "GET / HTTP/1.1\r\nHost: a\r\nCookie: sid=ann; sid=admin\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: localhost\r\nCookie: sid=ann; sid=admin\r\n\r\n",
     );
     assert_eq!(r.status, 400);
     let r = req(
         &app,
-        "GET / HTTP/1.1\r\nHost: a\r\nCookie: sid=ann\r\nCookie: x=1\r\n\r\n",
+        "GET / HTTP/1.1\r\nHost: localhost\r\nCookie: sid=ann\r\nCookie: x=1\r\n\r\n",
     );
-    assert_eq!(r.status, 400);
+    // Two fields are one header split in crumbs (HTTP/2 and HTTP/3 send
+    // them so): read together.
+    assert_eq!((r.status, r.text()), (200, "ann"));
+    let r = req(
+        &app,
+        "GET / HTTP/1.1\r\nHost: localhost\r\nCookie: sid=ann\r\nCookie: sid=admin\r\n\r\n",
+    );
+    assert_eq!(r.status, 400, "a name in two fields is cookie tossing");
 
     let codes: Vec<_> = log.0.lock().unwrap().iter().map(|e| e.2).collect();
     for c in [
@@ -428,7 +442,7 @@ fn test_respond_with_identity_skips_authentication() {
     let core = Core(gated(log));
     let r = req(
         &core,
-        "GET /admin HTTP/1.1\r\nHost: a\r\nCookie: sid=banned\r\n\r\n",
+        "GET /admin HTTP/1.1\r\nHost: localhost\r\nCookie: sid=banned\r\n\r\n",
     );
     assert_eq!(r.text(), "panel");
     assert_eq!(core.0.gate().authenticated.load(Ordering::Relaxed), 0);

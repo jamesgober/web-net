@@ -65,7 +65,7 @@ fn h<'a>(r: &'a TestReply, name: &str) -> &'a str {
 fn test_serves_a_file_with_validators() {
     let d = Dir::new("validators");
     let app = app(&d);
-    let r = send(&app, "GET /static/data.txt HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET /static/data.txt HTTP/1.1\r\nHost: localhost");
     assert_eq!((r.status, r.text()), (200, "0123456789"));
     assert_eq!(h(&r, "content-type"), "text/plain; charset=utf-8");
     assert_eq!(h(&r, "accept-ranges"), "bytes");
@@ -76,32 +76,32 @@ fn test_serves_a_file_with_validators() {
 
     let r = send(
         &app,
-        &format!("GET /static/data.txt HTTP/1.1\r\nHost: a\r\nIf-None-Match: {tag}"),
+        &format!("GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: {tag}"),
     );
     assert_eq!(r.status, 304);
     assert!(r.body.is_empty());
     let r = send(
         &app,
-        "GET /static/data.txt HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"other\"",
+        "GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"other\"",
     );
     assert_eq!(r.status, 200);
 
     let lm = {
-        let r = send(&app, "GET /static/data.txt HTTP/1.1\r\nHost: a");
+        let r = send(&app, "GET /static/data.txt HTTP/1.1\r\nHost: localhost");
         h(&r, "last-modified").to_owned()
     };
     let r = send(
         &app,
-        &format!("GET /static/data.txt HTTP/1.1\r\nHost: a\r\nIf-Modified-Since: {lm}"),
+        &format!("GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: {lm}"),
     );
     assert_eq!(r.status, 304);
     let r = send(
         &app,
-        "GET /static/data.txt HTTP/1.1\r\nHost: a\r\nIf-Modified-Since: Sun, 06 Nov 1994 08:49:37 GMT",
+        "GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: Sun, 06 Nov 1994 08:49:37 GMT",
     );
     assert_eq!(r.status, 200);
 
-    let r = send(&app, "HEAD /static/data.txt HTTP/1.1\r\nHost: a");
+    let r = send(&app, "HEAD /static/data.txt HTTP/1.1\r\nHost: localhost");
     assert_eq!((r.status, r.body.len()), (200, 0));
     assert_eq!(h(&r, "content-length"), "10");
 }
@@ -112,38 +112,40 @@ fn test_ranges() {
     let app = app(&d);
     let r = send(
         &app,
-        "GET /static/data.txt HTTP/1.1\r\nHost: a\r\nRange: bytes=2-4",
+        "GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=2-4",
     );
     assert_eq!((r.status, r.text()), (206, "234"));
     assert_eq!(h(&r, "content-range"), "bytes 2-4/10");
     let r = send(
         &app,
-        "GET /static/data.txt HTTP/1.1\r\nHost: a\r\nRange: bytes=-3",
+        "GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=-3",
     );
     assert_eq!(r.text(), "789");
     let r = send(
         &app,
-        "GET /static/data.txt HTTP/1.1\r\nHost: a\r\nRange: bytes=50-60",
+        "GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=50-60",
     );
     assert_eq!((r.status, h(&r, "content-range")), (416, "bytes */10"));
     let r = send(
         &app,
-        "GET /static/data.txt HTTP/1.1\r\nHost: a\r\nRange: bytes=0-0, 5-5",
+        "GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-0, 5-5",
     );
     assert_eq!((r.status, r.text()), (200, "0123456789"));
     let r = send(
         &app,
-        "GET /static/data.txt HTTP/1.1\r\nHost: a\r\nRange: bytes=2-4\r\nIf-Range: \"stale\"",
+        "GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=2-4\r\nIf-Range: \"stale\"",
     );
     assert_eq!(r.status, 200);
     let tag = h(
-        &send(&app, "GET /static/data.txt HTTP/1.1\r\nHost: a"),
+        &send(&app, "GET /static/data.txt HTTP/1.1\r\nHost: localhost"),
         "etag",
     )
     .to_owned();
     let r = send(
         &app,
-        &format!("GET /static/data.txt HTTP/1.1\r\nHost: a\r\nRange: bytes=2-4\r\nIf-Range: {tag}"),
+        &format!(
+            "GET /static/data.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=2-4\r\nIf-Range: {tag}"
+        ),
     );
     assert_eq!(r.status, 206);
 }
@@ -154,7 +156,7 @@ fn test_precompressed_variants() {
     let app = app(&d);
     let r = send(
         &app,
-        "GET /static/a.css HTTP/1.1\r\nHost: a\r\nAccept-Encoding: gzip, br",
+        "GET /static/a.css HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip, br",
     );
     assert_eq!((r.text(), h(&r, "content-encoding")), ("BROTLI", "br"));
     assert_eq!(h(&r, "vary"), "accept-encoding");
@@ -162,24 +164,24 @@ fn test_precompressed_variants() {
     let br_tag = h(&r, "etag").to_owned();
     let r = send(
         &app,
-        "GET /static/a.css HTTP/1.1\r\nHost: a\r\nAccept-Encoding: gzip",
+        "GET /static/a.css HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip",
     );
     assert_eq!((r.text(), h(&r, "content-encoding")), ("GZIP", "gzip"));
     assert_ne!(h(&r, "etag"), br_tag);
-    let r = send(&app, "GET /static/a.css HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET /static/a.css HTTP/1.1\r\nHost: localhost");
     assert_eq!(
         (r.text(), h(&r, "content-encoding")),
         ("body{color:red}", "")
     );
     let r = send(
         &app,
-        "GET /static/a.css HTTP/1.1\r\nHost: a\r\nAccept-Encoding: br;q=0, gzip;q=0",
+        "GET /static/a.css HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: br;q=0, gzip;q=0",
     );
     assert_eq!(r.text(), "body{color:red}");
     // Off for this mount.
     let r = send(
         &app,
-        "GET /docs/a.css HTTP/1.1\r\nHost: a\r\nAccept-Encoding: br",
+        "GET /docs/a.css HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: br",
     );
     assert_eq!((r.text(), h(&r, "vary")), ("body{color:red}", ""));
 }
@@ -199,24 +201,33 @@ fn test_refused_names_and_folders() {
         "/static/missing.txt",
         "/static",
     ] {
-        let r = send(&app, &format!("GET {p} HTTP/1.1\r\nHost: a"));
+        let r = send(&app, &format!("GET {p} HTTP/1.1\r\nHost: localhost"));
         assert_eq!(r.status, 404, "{p}");
     }
     // Paths that climb are canonicalized before the mount is even looked at.
-    let r = send(&app, "GET /static/../static/data.txt HTTP/1.1\r\nHost: a");
+    let r = send(
+        &app,
+        "GET /static/../static/data.txt HTTP/1.1\r\nHost: localhost",
+    );
     assert_eq!((r.status, h(&r, "location")), (301, "/static/data.txt"));
-    let r = send(&app, "GET /static/..%2f..%2fetc HTTP/1.1\r\nHost: a");
+    let r = send(
+        &app,
+        "GET /static/..%2f..%2fetc HTTP/1.1\r\nHost: localhost",
+    );
     assert_eq!(r.status, 400);
     // An index file for a folder where the mount has one.
     assert_eq!(
-        send(&app, "GET /docs/sub HTTP/1.1\r\nHost: a").text(),
+        send(&app, "GET /docs/sub HTTP/1.1\r\nHost: localhost").text(),
         "<h1>sub</h1>"
     );
-    assert_eq!(send(&app, "GET /docs HTTP/1.1\r\nHost: a").status, 404);
+    assert_eq!(
+        send(&app, "GET /docs HTTP/1.1\r\nHost: localhost").status,
+        404
+    );
     // Files take GET and HEAD only.
     let r = send(
         &app,
-        "POST /static/data.txt HTTP/1.1\r\nHost: a\r\nContent-Length: 0",
+        "POST /static/data.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0",
     );
     assert_eq!((r.status, h(&r, "allow")), (405, "GET, HEAD, OPTIONS"));
 }
@@ -234,7 +245,10 @@ fn test_short_names_do_not_reach_hidden_files() {
         if std::fs::canonicalize(d.0.join(short)).is_err() {
             continue;
         }
-        let r = send(&app, &format!("GET /static/{short} HTTP/1.1\r\nHost: a"));
+        let r = send(
+            &app,
+            &format!("GET /static/{short} HTTP/1.1\r\nHost: localhost"),
+        );
         assert_eq!(r.status, 404, "{short}");
     }
 }
@@ -249,7 +263,7 @@ fn test_more_device_names() {
         "/static/CON%20.txt",
     ] {
         assert_eq!(
-            send(&app, &format!("GET {p} HTTP/1.1\r\nHost: a")).status,
+            send(&app, &format!("GET {p} HTTP/1.1\r\nHost: localhost")).status,
             404,
             "{p}"
         );
@@ -268,7 +282,7 @@ fn test_unreadable_file_is_a_clean_500() {
         return; // running as root: the file is readable anyway
     }
     let app = app(&d);
-    let r = send(&app, "GET /static/locked.txt HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET /static/locked.txt HTTP/1.1\r\nHost: localhost");
     assert_eq!(r.status, 500);
     assert_eq!(h(&r, "etag"), "");
     assert_eq!(h(&r, "cache-control"), "no-store");
@@ -291,11 +305,11 @@ fn test_symlink_out_of_the_root_is_refused() {
     std::os::unix::fs::symlink(d.0.join("data.txt"), d.0.join("inside.txt")).unwrap();
     let app = app(&d);
     assert_eq!(
-        send(&app, "GET /static/leak.txt HTTP/1.1\r\nHost: a").status,
+        send(&app, "GET /static/leak.txt HTTP/1.1\r\nHost: localhost").status,
         404
     );
     assert_eq!(
-        send(&app, "GET /static/inside.txt HTTP/1.1\r\nHost: a").status,
+        send(&app, "GET /static/inside.txt HTTP/1.1\r\nHost: localhost").status,
         200
     );
 }
@@ -343,12 +357,12 @@ fn test_large_file_in_parts() {
     let d = Dir::new("large");
     let big: Vec<u8> = (0..(3 << 20) + 17).map(|i| (i % 251) as u8).collect();
     std::fs::write(d.0.join("big.bin"), &big).unwrap();
-    let (status, body) = raw(app(&d), "GET /static/big.bin HTTP/1.1\r\nHost: a");
+    let (status, body) = raw(app(&d), "GET /static/big.bin HTTP/1.1\r\nHost: localhost");
     assert_eq!((status, body.len()), (200, big.len()));
     assert!(body == big);
     let (status, body) = raw(
         app(&d),
-        "GET /static/big.bin HTTP/1.1\r\nHost: a\r\nRange: bytes=1048570-3145740",
+        "GET /static/big.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1048570-3145740",
     );
     assert_eq!(status, 206);
     assert!(body == big[1_048_570..=3_145_740]);
@@ -363,15 +377,18 @@ fn test_health_and_ready() {
         .ready("/readyz", move || flag.load(Ordering::Relaxed))
         .build()
         .unwrap();
-    let r = send(&app, "GET /healthz HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET /healthz HTTP/1.1\r\nHost: localhost");
     assert_eq!(
         (r.status, r.text(), h(&r, "cache-control")),
         (200, "ok", "no-store")
     );
-    assert_eq!(send(&app, "GET /readyz HTTP/1.1\r\nHost: a").status, 503);
+    assert_eq!(
+        send(&app, "GET /readyz HTTP/1.1\r\nHost: localhost").status,
+        503
+    );
     up.store(true, Ordering::Relaxed);
     assert_eq!(
-        send(&app, "GET /readyz HTTP/1.1\r\nHost: a").text(),
+        send(&app, "GET /readyz HTTP/1.1\r\nHost: localhost").text(),
         "ready"
     );
 }
@@ -415,7 +432,7 @@ fn test_security_headers() {
         .route(get("/", |cx| cx.text(200, "x")).public())
         .build()
         .unwrap();
-    let r = send(&bare, "GET / HTTP/1.1\r\nHost: a");
+    let r = send(&bare, "GET / HTTP/1.1\r\nHost: localhost");
     assert_eq!(
         (h(&r, "x-frame-options"), h(&r, "x-content-type-options")),
         ("", "nosniff")

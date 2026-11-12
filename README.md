@@ -26,7 +26,7 @@
     <br>
     <hr>
     <p>
-        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party runtime dependencies.
+        <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party dependencies of its own: the crates it builds on are first-party, and crypt-io (through csrf-sec, cookie-net, and form-net) brings the audited cryptography crates blake3, subtle, and zeroize, with arrayvec, constant_time_eq, cpufeatures, and cfg-if beneath them.
     </p>
     <blockquote>
         <strong>Status: <code>0.10.0</code>, beta.</strong> 1.0 waits for a site in production (`dev/READINESS-1.0.md`). The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>, and moving from 0.9 in <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
@@ -58,6 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 A handler ends with one reply: `cx.html`, `cx.text`, `cx.bytes`, `cx.redirect`, or `cx.render` for a template. `?` turns any error into the right error page.
+
+With no host declared, the site answers `localhost` (and `127.0.0.1`, `[::1]`, `*.localhost`) only, so it works on a laptop as it is and a name someone else points at the server is never the site. Declare the real host before deploying (`.host("example.com")`), or `.any_host()` behind a front that checked it.
 
 A site with a host, a folder, and a form:
 
@@ -101,15 +103,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Plugging in
 
-- **Authentication and authorization**: implement `Gate` (`authenticate`, `authorize`) and `Identity`, then `App::with_gate(gate)`. Every route then declares `.public()` or `.allow(rule)`, or the app does not build. A front layer that authenticates on its own passes the identity to `App::respond`.
+- **Authentication and authorization**: implement `Gate` (`authenticate`, `authorize`) and `Identity`, then `App::with_gate(gate)`. Every route then declares `.public()` or `.allow(rule)`, or the app does not build; a group's rule holds for every route in it. A front layer that authenticates on its own passes the identity to `App::respond` and forwards serve-net's `done` to the app.
 - **Templates**: implement `Render`. A typed engine compiles against your own types (`type View<'a> = Page<'a>`); a dynamic one reads any `View`. `App::builder().render(engine)` (or `App::with_gate(gate).render(engine)`). Engines live in their own crates; web-net depends on none.
 - **Detection and logs**: implement `Events` (every refusal, denial, failure, panic) and `Checkpoint` (in-flight revocation).
 
-Built in: static files (`Assets`: validators, ranges, precompressed variants, no escape from the folder), health and readiness paths, strict security headers by default (`SecurityHeaders`), cookies out through cookie-net, and a 304 fast path for pages (`Cx::not_modified`).
+Built in: static files (`Assets`: validators, ranges, precompressed variants, no escape from the folder), health and readiness paths, strict security headers by default (`SecurityHeaders`), cookies out through cookie-net, and a 304 fast path for pages (`Context::not_modified`).
 
-Forms and uploads through form-net (`Cx::form`, `Cx::upload`), CSRF through csrf-sec on every unsafe method (origin policy and a session-bound token; a route without either does not build unless it is exempt with a reason), allowlisted external redirects, and `If-Match` preconditions.
+Forms and uploads through form-net (`Context::form`, `Context::upload`), CSRF through csrf-sec on every unsafe method (origin policy and a session-bound token; a route without either does not build unless it is exempt with a reason), allowlisted external redirects, and `If-Match` preconditions.
 
-Negotiation (JSON error replies, `Cx::accept`, `Cx::accept_language`), CORS per route or group, gzip compression, cache policies with a report a cache in front can trust (`App::respond`), and several sites in one table (`Sites`).
+Negotiation (JSON error replies, `Context::accept`, `Context::accept_language`), CORS per route or group, gzip compression, cache policies with a report a cache in front can trust (`App::respond`), and several sites in one table (`Sites`).
 
 Performance: the warm request path allocates nothing, route lookup does not grow with the number of routes, and web-net adds well under a microsecond of its own work per request (`docs/PERFORMANCE.md`).
 

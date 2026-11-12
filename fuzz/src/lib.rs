@@ -4,7 +4,7 @@
 use std::sync::OnceLock;
 
 use web_net::csrf_sec::Csrf;
-use web_net::{App, Cors, Cx, Denial, Gate, Group, Hook, Identity, Request, Route, Routes, get};
+use web_net::{App, Cors, Context, Denial, Gate, Group, Hook, Identity, Request, Route, Routes, get};
 
 pub struct Visitor {
     sid: Option<String>,
@@ -63,14 +63,14 @@ pub fn app() -> &'static App<FuzzGate> {
             .base("/site")
             .sign_in("/login")
             .csrf(Csrf::new(*b"web-net fuzz key, 32 bytes long!").expect("key"))
-            .hook(Hook::Routed, Routes::prefix("/blog"), |cx: &mut Cx<'_, Visitor>| {
+            .hook(Hook::Routed, Routes::prefix("/blog"), |cx: &mut Context<'_, Visitor>| {
                 let _ = cx.query("lang")?;
                 Ok(())
             })
-            .route(get("/", |cx: &mut Cx<'_, Visitor>| {
+            .route(get("/", |cx: &mut Context<'_, Visitor>| {
                 cx.text(200, "home")
             }).public())
-            .route(get("/login", |cx: &mut Cx<'_, Visitor>| {
+            .route(get("/login", |cx: &mut Context<'_, Visitor>| {
                 let next = cx.query("next")?.unwrap_or_default().into_owned();
                 cx.text(200, &next)
             }).public())
@@ -78,35 +78,35 @@ pub fn app() -> &'static App<FuzzGate> {
                 Group::at("/blog")
                     .public()
                     .cors(Cors::new().origin("https://app.a").headers(&["content-type"]))
-                    .route(get("/", |cx: &mut Cx<'_, Visitor>| {
+                    .route(get("/", |cx: &mut Context<'_, Visitor>| {
                         cx.text(200, "blog")
                     }))
-                    .route(get("/:slug", |cx: &mut Cx<'_, Visitor>| {
+                    .route(get("/:slug", |cx: &mut Context<'_, Visitor>| {
                         let s = cx.param("slug")?.into_owned();
                         cx.text(200, &s)
                     }))
-                    .route(get("/:year/:slug", |cx: &mut Cx<'_, Visitor>| {
+                    .route(get("/:year/:slug", |cx: &mut Context<'_, Visitor>| {
                         let y: u16 = cx.param_as("year")?;
                         cx.text(200, &y.to_string())
                     })),
             )
-            .route(get("/files/*rest", |cx: &mut Cx<'_, Visitor>| {
+            .route(get("/files/*rest", |cx: &mut Context<'_, Visitor>| {
                 let r = cx.param("rest")?.into_owned();
                 cx.text(200, &r)
             }).public())
             .route(
                 Route::at("/account")
-                    .get(|cx: &mut Cx<'_, Visitor>| {
+                    .get(|cx: &mut Context<'_, Visitor>| {
                         let t = cx.csrf_token()?;
                         cx.text(200, &t)
                     })
-                    .post(|cx: &mut Cx<'_, Visitor>| {
+                    .post(|cx: &mut Context<'_, Visitor>| {
                         let f: Email = cx.form()?;
                         cx.text(200, &f.email)
                     })
                     .allow(Rule::SignedIn),
             )
-            .route(get("/admin", |cx: &mut Cx<'_, Visitor>| {
+            .route(get("/admin", |cx: &mut Context<'_, Visitor>| {
                 // A field no echoing route can set: the fuzz targets look for it.
                 cx.set_header("x-admin-page", "1");
                 cx.text(200, "admin")

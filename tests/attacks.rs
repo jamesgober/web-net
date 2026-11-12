@@ -4,8 +4,8 @@
 use serve_net::Scheme;
 use serve_net::testing::{TestReply, TestRequest, respond};
 use web_net::{
-    App, Assets, Cors, Cx, Denial, Error, Gate, Group, Identity, Request, SecurityHeaders, get,
-    post,
+    App, Assets, Context, Cors, Denial, Error, Gate, Group, Identity, Request, SecurityHeaders,
+    get, post,
 };
 
 fn send(app: &impl serve_net::HttpService, raw: &str) -> TestReply {
@@ -50,16 +50,21 @@ impl Gate for AdminCookie {
 fn guarded() -> App<AdminCookie> {
     App::with_gate(AdminCookie)
         .host("example.com")
-        .route(get("/", |cx: &mut Cx<'_, Who>| cx.text(200, "home")).public())
+        .route(get("/", |cx: &mut Context<'_, Who>| cx.text(200, "home")).public())
         .group(
             Group::at("/admin")
                 .allow(())
-                .route(get("/", |cx: &mut Cx<'_, Who>| cx.text(200, "ADMIN")))
-                .route(get("/users/:id", |cx: &mut Cx<'_, Who>| {
+                .route(get("/", |cx: &mut Context<'_, Who>| cx.text(200, "ADMIN")))
+                .route(get("/users/:id", |cx: &mut Context<'_, Who>| {
                     cx.text(200, "ADMIN")
                 })),
         )
-        .route(get("/files/*rest", |cx: &mut Cx<'_, Who>| cx.text(200, "file")).public())
+        .route(
+            get("/files/*rest", |cx: &mut Context<'_, Who>| {
+                cx.text(200, "file")
+            })
+            .public(),
+        )
         .build()
         .unwrap()
 }
@@ -193,7 +198,10 @@ fn t04_open_redirects() {
         "%2F%2Fevil.example",
         "/%0d%0aSet-Cookie:x",
     ] {
-        let r = send(&app, &format!("GET /go?to={to} HTTP/1.1\r\nHost: a"));
+        let r = send(
+            &app,
+            &format!("GET /go?to={to} HTTP/1.1\r\nHost: localhost"),
+        );
         assert!(!h(&r, "location").contains("evil"), "{to}");
         assert!(r.header("set-cookie").is_none(), "{to}");
     }
@@ -202,7 +210,10 @@ fn t04_open_redirects() {
         "https://accounts.example.com@evil.example/",
         "javascript:alert(1)",
     ] {
-        let r = send(&app, &format!("GET /out?to={to} HTTP/1.1\r\nHost: a"));
+        let r = send(
+            &app,
+            &format!("GET /out?to={to} HTTP/1.1\r\nHost: localhost"),
+        );
         assert_eq!(r.status, 500, "{to}");
     }
 }
@@ -228,7 +239,7 @@ fn t05_errors_leak_nothing() {
     ] {
         let r = send(
             &app,
-            &format!("GET {p} HTTP/1.1\r\nHost: a\r\nAccept: {accept}"),
+            &format!("GET {p} HTTP/1.1\r\nHost: localhost\r\nAccept: {accept}"),
         );
         assert_eq!(r.status, 500);
         let t = r.text();
@@ -252,7 +263,7 @@ fn t06_no_half_replies() {
         )
         .build()
         .unwrap();
-    let r = send(&app, "GET / HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET / HTTP/1.1\r\nHost: localhost");
     assert_eq!(r.status, 403);
     assert!(r.header("set-cookie").is_none() && r.header("location").is_none());
 }
@@ -278,10 +289,16 @@ fn t07_header_injection() {
         )
         .build()
         .unwrap();
-    let r = send(&app, "GET /?v=a%0d%0aSet-Cookie:%20x=1 HTTP/1.1\r\nHost: a");
+    let r = send(
+        &app,
+        "GET /?v=a%0d%0aSet-Cookie:%20x=1 HTTP/1.1\r\nHost: localhost",
+    );
     assert_eq!(r.status, 500);
     assert!(r.header("set-cookie").is_none());
-    assert_eq!(send(&app, "GET /len HTTP/1.1\r\nHost: a").status, 500);
+    assert_eq!(
+        send(&app, "GET /len HTTP/1.1\r\nHost: localhost").status,
+        500
+    );
 }
 
 /// T-8 and T-9: ambiguity is refused, never resolved by picking.
@@ -309,7 +326,7 @@ fn t08_t09_pollution_and_cookie_tossing() {
         .build()
         .unwrap();
     assert_eq!(
-        send(&q, "GET /?role=user&role=admin HTTP/1.1\r\nHost: a").status,
+        send(&q, "GET /?role=user&role=admin HTTP/1.1\r\nHost: localhost").status,
         400
     );
 }
@@ -339,7 +356,7 @@ fn t10_csrf() {
     }
     let app = App::with_gate(S)
         .csrf(web_net::csrf_sec::Csrf::new(*b"attack test csrf key, 32 bytes!!").unwrap())
-        .route(post("/transfer", |cx: &mut Cx<'_, V>| cx.text(200, "MOVED")).public())
+        .route(post("/transfer", |cx: &mut Context<'_, V>| cx.text(200, "MOVED")).public())
         .build()
         .unwrap();
     for extra in [
@@ -351,7 +368,7 @@ fn t10_csrf() {
         let r = send(
             &app,
             &format!(
-                "POST /transfer HTTP/1.1\r\nHost: a\r\n{extra}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 12\r\n\r\namount=1000&"
+                "POST /transfer HTTP/1.1\r\nHost: localhost\r\n{extra}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 12\r\n\r\namount=1000&"
             ),
         );
         assert_ne!(r.text(), "MOVED", "{extra}");
@@ -384,12 +401,12 @@ fn t11_t12_traversal_and_special_files() {
         "/s/CON",
         "/s/%c0%ae%c0%ae/secret.txt",
     ] {
-        let r = send(&app, &format!("GET {p} HTTP/1.1\r\nHost: a"));
+        let r = send(&app, &format!("GET {p} HTTP/1.1\r\nHost: localhost"));
         assert_ne!(r.text(), "SECRET", "{p}");
         if matches!(r.status, 301 | 308) {
             let to = h(&r, "location").to_owned();
             assert_ne!(
-                send(&app, &format!("GET {to} HTTP/1.1\r\nHost: a")).text(),
+                send(&app, &format!("GET {to} HTTP/1.1\r\nHost: localhost")).text(),
                 "SECRET",
                 "{p} -> {to}"
             );
@@ -425,7 +442,7 @@ fn t14_cross_origin_reads() {
         .unwrap();
     let r = send(
         &app,
-        "GET /me HTTP/1.1\r\nHost: a\r\nOrigin: https://evil.example",
+        "GET /me HTTP/1.1\r\nHost: localhost\r\nOrigin: https://evil.example",
     );
     assert!(r.header("access-control-allow-origin").is_none());
     assert!(
@@ -450,7 +467,7 @@ fn t15_budgets() {
         .unwrap();
     let deep = "/a".repeat(300);
     assert_eq!(
-        send(&app, &format!("GET {deep} HTTP/1.1\r\nHost: a")).status,
+        send(&app, &format!("GET {deep} HTTP/1.1\r\nHost: localhost")).status,
         400
     );
     let many = App::builder()
@@ -465,7 +482,7 @@ fn t15_budgets() {
         )
         .build()
         .unwrap();
-    assert_eq!(send(&many, "GET / HTTP/1.1\r\nHost: a").status, 500);
+    assert_eq!(send(&many, "GET / HTTP/1.1\r\nHost: localhost").status, 500);
 }
 
 /// A C1 control (U+0080 to U+009F, NEL among them) is a control: refused
@@ -477,9 +494,9 @@ fn t01b_c1_controls_in_a_path_are_refused() {
         .build()
         .unwrap();
     for p in ["/a%C2%85b", "/%c2%80", "/x/%C2%9F"] {
-        let r = send(&app, &format!("GET {p} HTTP/1.1\r\nHost: a"));
+        let r = send(&app, &format!("GET {p} HTTP/1.1\r\nHost: localhost"));
         assert_eq!(r.status, 400, "{p}");
     }
-    let r = send(&app, "GET /caf%C3%A9 HTTP/1.1\r\nHost: a");
+    let r = send(&app, "GET /caf%C3%A9 HTTP/1.1\r\nHost: localhost");
     assert_eq!((r.status, r.text()), (200, "café"));
 }
