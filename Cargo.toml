@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "web-net"
-version = "0.10.0"
+version = "0.10.1"
 
 # Minimum Supported Rust Version (MSRV)
 rust-version = "1.85"
@@ -28,7 +28,6 @@ keywords = ["web", "framework", "router", "http", "server"]
 categories = ["web-programming", "web-programming::http-server"]
 
 # Links
-homepage      = "https://github.com/jamesgober/web-net"
 repository    = "https://github.com/jamesgober/web-net"
 documentation = "https://docs.rs/web-net"
 
@@ -57,7 +56,7 @@ uploads = ["form-net/fs"]
 [dependencies]
 # First-party crates at published versions only (dev/DIRECTIVES.md section 2).
 # serve-net: the server web-net runs in; HttpService, HttpRequest, HttpReply.
-serve-net = { version = "0.7.1", default-features = false, features = ["http1"] }
+serve-net = { version = "0.8.1", default-features = false, features = ["http1"] }
 # cookie-net: reading the Cookie field for gates (duplicates refused).
 cookie-net = { version = "0.8", default-features = false, features = ["std"] }
 # parse-net: entity tags, HTTP dates, ranges, and content negotiation.

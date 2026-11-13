@@ -41,9 +41,9 @@ App::builder()
     .wait();
 ```
 
-## Findings
+## What changed
 
-| # | Finding | Fix in 0.10 |
+| # | Problem | Fix in 0.10 |
 |---|---|---|
 | S-1 | Serving an app needs serve-net's `Server::builder()`, a `ListenerSpec`, and a second dependency. | `App::listen(addr)` and `Sites::listen(addr)`: one TCP listener per resolved address, serve-net's defaults. `Server::builder().serve(app)` stays for everything else. |
 | S-2 | Every reply writer returns `&mut Self`, so every handler ends with `; Ok(())`. | `Cx::html`, `Cx::text`, and `Cx::bytes` return `Result`: a handler that writes one reply is one expression. |
@@ -59,7 +59,7 @@ App::builder()
 | S-12 | `Route::at(pattern)` but `Group::new(prefix)`. | `Group::at(prefix)`. |
 | S-13 | `docs/API.md` listed signatures as pseudo-code that never compiled, so it could drift. | Rewritten as a task-oriented reference; every block compiles as a doctest, the README's too. |
 | S-14 | An `Events` sink the application also reads (a counter) needed a hand-written impl on `&'static T`; the orphan rule ruled out `Arc<T>`. | `Events` and `Checkpoint` are implemented for `Arc<T>`: `.events(Arc::clone(&sink))`. |
-| S-15 | An error page of a site installed in a folder could not link its stylesheet: `ErrorPage` had no base path, and only the router knew it. (Found by a gateway building a site under `/blog/`.) | `ErrorPage::base` (`""` or `/blog`) and `ErrorPage::url(path)`, as `Cx::url` for pages; `with_base` for an engine's tests. Additive: `ErrorPage` is `#[non_exhaustive]` and `ErrorPage::new` is unchanged. |
+| S-15 | An error page of a site installed in a folder could not link its stylesheet: `ErrorPage` had no base path, and only the router knew it. | `ErrorPage::base` (`""` or `/blog`) and `ErrorPage::url(path)`, as `Cx::url` for pages; `with_base` for an engine's tests. Additive: `ErrorPage` is `#[non_exhaustive]` and `ErrorPage::new` is unchanged. |
 | S-16 | `Cx`, the type every handler names, is an abbreviation a newcomer has to decode. | `Context`. Closures keep the short variable name `cx`, as Rust code names a context. |
 
 ## Kept, with the reason
@@ -68,5 +68,5 @@ App::builder()
 - **`.public()` and `.allow(rule)` with a gate that has rules**: declaring access on every route is the security rule that a forgotten check fails the build, not the request.
 - **`cx.render(&view)` and `cx.render_view(&dyn View)`**: the second exists only for engines whose view type is `dyn View`, where Rust cannot coerce the argument during inference. One per engine kind.
 - **`param` and `param_as`**: text and parsed are different results (500 for a missing name, 404 for a value that does not parse).
-- **The `Render` trait, `Output`, and the view types**: unchanged; `ErrorPage` only gained `base` and `url` (S-15). They passed the review (one trait, three methods, plain names), and Luminess implements them; any change goes through the coordinated 0.10 of both crates.
+- **The `Render` trait, `Output`, and the view types**: unchanged; `ErrorPage` only gained `base` and `url` (S-15). They already meet the test (one trait, three methods, plain names), and Luminess implements them; a change there would mean a release of both crates together.
 - **Tier 3 items** (`classify`, `RouteId`, `Checkpoint`, `Stage`, `Hook`, `Routes`, `form_inspected`, `precondition`, `WorkClass`): for gateways and policies, documented after the common case.

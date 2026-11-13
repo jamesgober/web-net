@@ -31,20 +31,10 @@ Every row has an attack test in `tests/attacks.rs` (the id is the test's prefix)
 
 Also defended, with tests elsewhere: personal pages in a shared cache (the `Guests` policy is private for signed-in visitors, a reply with a cookie is never public, and `App::respond` never marks a reply keepable when it sets a cookie, has the handler's own `Cache-Control`, or has a CORS policy: `tests/negotiation.rs`), compression side channels (compression is off by default; csrf-sec masks tokens per reply; any other secret on a compressed page beside reflected input stays exposed to BREACH, so pages that carry one leave compression off), and handlers that write HTML themselves (`escape_html`).
 
-## Review
+## Fixed in earlier releases
 
-0.7 had an independent adversarial review of `src/`. It found seven defects, all fixed with regression tests before the release: a multipart CSRF token checked after the handler had run (now before), `public` caching of a reply with a cookie, a cacheability report that missed the handler's own `Cache-Control` and CORS fields, Windows short names reaching dot files, a failed file read leaving a broken reply, a preflight listing methods without a policy, and an empty `Host` passing the host check. Its lower-confidence notes (superscript device names, `CON .txt`, `/style.css/` under `TrailingSlash::Add`) were fixed too. Recorded as PLAN D-046 to D-050.
-
-A second review, of the fixes and the code new in 0.7, found no CSRF bypass and four more defects, all fixed with regression tests (`tests/review.rs`): a large file changed between the parts of its reply could finish cleanly with the wrong bytes (now an abortive close); the gate's clearing cookie could cancel a session the handler had just set; a handler's own `public` cache header could go out beside a pre-session cookie (a login-CSRF vector through a shared cache); and health paths did not answer under `TrailingSlash::Add`. Preflights now run before the gate as the plan says. Recorded as PLAN D-051 to D-055.
-
-An independent review of 0.9.0 found no CSRF bypass and no way out of the static folder (every traversal, encoding, Windows-name, and hidden-file probe failed). Its findings, all fixed in 0.10.0 with regression tests (`tests/review2.rs`, `tests/streams.rs`):
-
-- a large-file download still in progress was forgotten after 256 later large-file replies on its worker and restarted from byte 0 mid-body, ending cleanly with the wrong bytes (T-16);
-- panics outside the handler (gate, checkpoint, event sink, error template) were not caught, answered, or reported (T-5);
-- static files resolved their path again on every request and every part (now cached, see `PERFORMANCE.md`);
-- the method answers revealed routes the gate hides; any `Host` was accepted with none declared; an upper-case literal under `lowercase_paths` built and never matched; `Context::url` accepted `//evil`; compression dropped `accept-encoding` from a handler's own `Vary`; a checkpoint's deny status was not range-checked; a route's own rule replaced its group's instead of adding to it.
-
-Recorded as PLAN D-072 to D-084.
+- 0.7: a multipart CSRF token was checked after the handler had run (now before); a reply with a cookie could be cached as `public`; the cacheability report missed the handler's own `Cache-Control` and CORS fields; Windows short names reached dot files; a failed file read left a broken reply; a preflight listed methods without a policy; an empty `Host` passed the host check; superscript device names, `CON .txt`, and `/style.css/` under `TrailingSlash::Add` were not refused. Later in 0.7: a large file changed between the parts of its reply could finish cleanly with the wrong bytes (now an abortive close); the gate's clearing cookie could cancel a session the handler had just set; a handler's own `public` cache header could go out beside a pre-session cookie; health paths did not answer under `TrailingSlash::Add`; preflights now run before the gate. Recorded as PLAN D-046 to D-055.
+- 0.10: a large-file download still in progress was forgotten after 256 later large-file replies on its worker and restarted from byte 0 mid-body, ending cleanly with the wrong bytes (T-16); panics outside the handler (gate, checkpoint, event sink, error template) were not caught, answered, or reported (T-5); the method answers revealed routes the gate hides; any `Host` was accepted with none declared; an upper-case literal under `lowercase_paths` built and never matched; `Context::url` accepted `//evil`; compression dropped `accept-encoding` from a handler's own `Vary`; a checkpoint's deny status was not range-checked; a route's own rule replaced its group's instead of adding to it; a path decoding to a C1 control character was accepted. Every traversal, encoding, Windows-name, and hidden-file probe against the static folder failed, and no CSRF bypass turned up. Recorded as PLAN D-071 to D-085.
 
 ## What web-net does not do
 
@@ -55,7 +45,7 @@ Recorded as PLAN D-072 to D-084.
 
 ## Verification
 
-- `tests/attacks.rs`: one attack per threat; `tests/review2.rs` and `tests/streams.rs`: the 0.9.0 review's findings.
+- `tests/attacks.rs`: one attack per threat; `tests/regressions_0_7.rs`, `tests/regressions_0_10.rs`, and `tests/streams.rs`: the bugs fixed in 0.7 and 0.10.
 - Property tests (`src/url.rs`, `src/router.rs`): normalization is idempotent and never leaves a dot segment, an empty segment, a backslash, or a control; every spelling of a path normalizes to one canonical path; decoding inverts the canonical encoding; route lookup is sound and complete against the plain definition.
 - Fuzz targets (`fuzz/`): `request` (any bytes as requests on a keep-alive connection) and `path` (any request target, with the no-redirect-loop and no-bypass invariants).
 - `tests/alloc.rs`: the warm request path allocates nothing.

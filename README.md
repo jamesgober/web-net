@@ -29,7 +29,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition). <code>#![forbid(unsafe_code)]</code>. No third-party dependencies of its own: the crates it builds on are first-party, and crypt-io (through csrf-sec, cookie-net, and form-net) brings the audited cryptography crates blake3, subtle, and zeroize, with arrayvec, constant_time_eq, cpufeatures, and cfg-if beneath them.
     </p>
     <blockquote>
-        <strong>Status: <code>0.10.0</code>, beta.</strong> 1.0 waits for a site in production (`dev/READINESS-1.0.md`). The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>, and moving from 0.9 in <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
+        <strong>Status: <code>0.10.1</code>, beta.</strong> 1.0 waits for a site in production (`dev/READINESS-1.0.md`). The API is pre-1.0 and may change between minor versions. The design is in <a href="./dev/PLAN.md"><code>dev/PLAN.md</code></a>, the schedule in <a href="./dev/ROADMAP.md"><code>dev/ROADMAP.md</code></a>, the reference in <a href="./docs/API.md"><code>docs/API.md</code></a>, and moving from 0.9 in <a href="./CHANGELOG.md"><code>CHANGELOG.md</code></a>.
     </blockquote>
 </div>
 

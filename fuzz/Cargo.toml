@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-serve-net = { version = "0.7.1", default-features = false, features = ["http1"] }
+serve-net = { version = "0.8.1", default-features = false, features = ["http1"] }
 web-net = { path = ".." }
 
 # Its own workspace, so the library's builds never include it.

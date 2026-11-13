@@ -43,7 +43,7 @@ web-net is the web layer: sites and canonical URLs, the router, the gate checkpo
 7. Hot-path changes carry benchmarks; no regression over 5%.
 8. `README.md`, `docs/API.md`, and `CHANGELOG.md` updated; the matching `docs/release/vX.Y.Z.md` written before the tag.
 9. `PLAN.md` decision log updated for every design decision made during the work.
-10. v1.0.0 only after the first site has used the API end to end, and after an adversarial review with every finding fixed test-first.
+10. v1.0.0 only after the first site has used the API end to end, and after a security pass with every defect fixed test-first.
 
 ---
 

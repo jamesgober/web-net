@@ -352,6 +352,32 @@ impl<'r> Request<'r> {
         self.env.client().scheme()
     }
 
+    /// The TLS handshake, when serve-net decrypted the connection itself:
+    /// the server name the client asked for, the negotiated protocol, the
+    /// version and cipher suite, and the SHA-256 of a verified client
+    /// certificate's public key. `None` over plain HTTP and behind a front
+    /// that decrypted. serve-net has already refused a request whose `Host`
+    /// names another server than the TLS server name (421), unless the
+    /// listener allowed it.
+    ///
+    /// ```
+    /// use web_net::{App, get};
+    ///
+    /// let app = App::builder()
+    ///     .route(get("/", |cx| {
+    ///         let pinned = cx.request().tls().and_then(|t| t.peer_spki_sha256()).is_some();
+    ///         cx.text(200, if pinned { "client certificate" } else { "none" })
+    ///     }))
+    ///     .build()?;
+    /// let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    /// assert_eq!(r.text(), "none");
+    /// # Ok::<(), web_net::BuildError>(())
+    /// ```
+    #[must_use]
+    pub fn tls(&self) -> Option<&'r serve_net::net_io::TlsInfo> {
+        self.env.tls()
+    }
+
     /// The pattern of the matched route (`/users/:id`), once routing ran.
     ///
     /// ```
