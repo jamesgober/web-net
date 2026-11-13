@@ -572,7 +572,7 @@ macro_rules! method_fn {
     };
 }
 
-method_fn!(
+method_fn! {
     /// A route with a `GET` handler (and so `HEAD`).
     ///
     /// ```
@@ -584,8 +584,8 @@ method_fn!(
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
     get, Get
-);
-method_fn!(
+}
+method_fn! {
     /// A route with a `POST` handler.
     ///
     /// ```
@@ -602,8 +602,8 @@ method_fn!(
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
     post, Post
-);
-method_fn!(
+}
+method_fn! {
     /// A route with a `PUT` handler.
     ///
     /// ```
@@ -620,8 +620,8 @@ method_fn!(
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
     put, Put
-);
-method_fn!(
+}
+method_fn! {
     /// A route with a `PATCH` handler.
     ///
     /// ```
@@ -638,8 +638,8 @@ method_fn!(
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
     patch, Patch
-);
-method_fn!(
+}
+method_fn! {
     /// A route with a `DELETE` handler.
     ///
     /// ```
@@ -656,7 +656,7 @@ method_fn!(
     /// # Ok::<(), web_net::BuildError>(())
     /// ```
     delete, Delete
-);
+}
 
 /// Routes sharing a path prefix and an access boundary.
 ///
