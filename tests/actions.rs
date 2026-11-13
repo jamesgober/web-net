@@ -295,7 +295,7 @@ fn test_multipart_token_is_checked_before_the_handler() {
         b
     };
     // A valid token, then a second one: refused, as on the urlencoded and
-    // header paths (form-net's review).
+    // header paths.
     let two_tokens = format!(
         "--B\r\nContent-Disposition: form-data; name=csrf_token\r\n\r\n{t}\r\n--B\r\nContent-Disposition: form-data; name=csrf_token\r\n\r\nOTHER\r\n--B\r\nContent-Disposition: form-data; name=doc; filename=a.txt\r\n\r\nhi\r\n--B--"
     )

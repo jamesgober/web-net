@@ -49,7 +49,7 @@ web-net = "0.10"
 ```
 
 web-net runs on serve-net. `App::listen` starts a server with serve-net's
-defaults, so most sites need no other dependency; add `serve-net = "0.7"`
+defaults, so most sites need no other dependency; add `serve-net = "0.8"`
 for TLS, several listeners, other limits, or `serve_net::testing` in tests.
 
 ## A site in five lines
@@ -742,7 +742,10 @@ assert_eq!(r.text(), "blog");
 `Request` is what gates and handlers read: `method()`, `path()` (canonical,
 inside the site), `query()`, `host()`, `header(name)`, `header_str(name)`,
 `cookie(name) -> Result<Option<&str>, Ambiguous>` (a name sent twice is
-`Ambiguous`, never resolved by picking one), `client()`, `scheme()`,
+`Ambiguous`, never resolved by picking one; several `Cookie` fields are read
+as one), `client()`, `scheme()`, `tls()` (the TLS handshake when serve-net
+decrypted the connection: server name, protocol, a verified client
+certificate's key hash),
 `route()` (the matched pattern), `id()`, `envelope()`, `raw()`. `RequestId`
 displays as 16 hexadecimal digits, a keyed hash that shows no counter;
 `connection()` and `seq()` give the raw values for logs.

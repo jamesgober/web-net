@@ -4,14 +4,14 @@
 
 ## Recommendation
 
-**Not yet.** The code, the tests, and the review are where a 1.0 should be. What is missing is use: no site has run on web-net in production, and DIRECTIVES section 3 item 10 makes that a condition of 1.0. Keep releasing 0.9.x until a site has run on it for two weeks, then decide.
+**Not yet.** The code and the tests are where a 1.0 should be. What is missing is use: no site has run on web-net in production, and DIRECTIVES section 3 item 10 makes that a condition of 1.0. Keep releasing 0.9.x until a site has run on it for two weeks, then decide.
 
 ## Done
 
 | Area | State |
 |---|---|
 | Request path | site, canonical URL, early (files, health), authenticate, route, method, authorize, checkpoint, CSRF, hooks, handler, render, finish; every step tested in memory and over a socket (`examples/hello.rs`, `examples/site.rs`) |
-| Security | every threat in PLAN section 13 has an attack test (`tests/attacks.rs`, T-1 to T-15); property tests for paths and lookup; two fuzz targets, 24 hours each on the 0.9 code; two independent adversarial reviews and a form-net cross-review in 0.7, all twelve findings fixed test-first; `docs/SECURITY.md` |
+| Security | every threat in PLAN section 13 has an attack test (`tests/attacks.rs`, T-1 to T-15); property tests for paths and lookup; two fuzz targets, 24 hours each on the 0.9 code; twelve defects found in 0.7 and fixed test-first; `docs/SECURITY.md` |
 | Performance | no allocation per warm request (counted); lookup flat from 10 to 10,000 routes; about 0.7 µs of web-net's own work per request on a loaded machine (`docs/PERFORMANCE.md`) |
 | Integrations | gatekeeper-io's `Gate` builds an `App` unchanged; Luminess implements `Render` with its own typed views (behind its optional `web-net` feature); form-net's alpha routes run with csrf-sec; serve-net 0.7 underneath |
 | API | `docs/API.md`; reported structs and growing enums are `#[non_exhaustive]`; zero third-party runtime dependencies; MSRV 1.85; CI on Linux, macOS, Windows, stable and 1.85 |

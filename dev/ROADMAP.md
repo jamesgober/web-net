@@ -61,7 +61,7 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - [x] Property tests: every spelling reaches one path; normalization idempotent and clean; decoding inverts encoding; lookup sound and complete.
 - [x] Fuzz targets `request` (normalization, routing, gates, cookies, query, CSRF, forms through whole requests) and `path` (no redirect loops, no gate bypass). See the release notes for the hours run.
 - [x] `docs/SECURITY.md`.
-- [x] An independent adversarial review of `src/`, findings fixed test-first.
+- [x] Every module read again for attacks, defects fixed test-first.
 - [x] `Identity::set_cookie`, `Denial::with_cookie` (asked for by a gate implementation).
 - Moved to 0.9 (polish pass): fuzzing to 24 hours per target. Reason: the machine is shared and loaded; 0.7 ships after a shorter clean run, and the 0.9 polish pass runs both targets the full 24 hours on the final code.
 
@@ -69,7 +69,7 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
 - [x] A template engine in use: Luminess renders the example site's pages straight into the reply (`Cx::body_mut`). `Render` gained a generic associated view type so Luminess can implement it directly, typed (D-058); its glue lands behind a feature in Luminess against web-net 0.8.
 - [x] A gate implementation: gatekeeper-io's `impl web_net::Gate` (its feature `web-net`) compiles and builds an `App` against 0.8 with only its version pin moved (checked locally; gatekeeper-io is not on crates.io yet, so nothing in this repository depends on it).
 - [x] form-net's alpha routes (login urlencoded with its token; avatar multipart with the token before the file) run in web-net (`tests/actions.rs`, `examples/site.rs`).
-- [x] Freeze review of the public API: `#[non_exhaustive]` on the structs web-net makes (`Event`, `Served`, `Classified`, `Problem`); `Cx::next_path` for sign-in pages.
+- [x] Freeze pass over the public API: `#[non_exhaustive]` on the structs web-net makes (`Event`, `Served`, `Classified`, `Problem`); `Cx::next_path` for sign-in pages.
 - Not met, with reasons: a site running on web-net in production (needs the platform it serves to be deployed: James), and gatekeeper-io from crates.io (its repositories are James's to create).
 - [x] An example site with sign-in, a form, an upload, and static files (`examples/site.rs`, shipped in 0.7), rendered by Luminess through `Cx::body_mut`. Themed error pages wait for an engine that implements `Render`.
 
@@ -80,7 +80,7 @@ Exit: a login form and an avatar upload run as form-net's alpha routes describe 
   - kept, with reasons in the plan: no after-response hook (D-041), no per-variant cache in web-net (the cacheability report), gzip only (D-038);
   - waiting on other crates, asked for: serve-net's reply buffer (O-4) and explicit abort (O-7), a Brotli encoder in compress-lib.
 - [x] Both fuzz targets 24 hours on the final code (moved from 0.7).
-- [x] Adversarial review, findings fixed test-first (two independent reviews in 0.7, eleven defects fixed; a form-net cross-review in 0.7).
+- [x] Security pass, defects fixed test-first (eleven in 0.7, one more from form-net's side).
 - [x] `dev/READINESS-1.0.md` for James.
 - Moved to 0.9.x, with the reason: benchmarks on a quiet machine with the per-step split. The shared machine has not been quiet through any release; the numbers in `docs/PERFORMANCE.md` stay relative until it is.
 

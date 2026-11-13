@@ -1,4 +1,4 @@
-//! Regressions for the second adversarial review (0.7): each case failed
+//! Bugs fixed in 0.7: each case failed
 //! before its fix.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -21,7 +21,7 @@ fn h<'a>(r: &'a TestReply, name: &str) -> &'a str {
 /// ends; the reply never finishes cleanly with the wrong bytes.
 #[test]
 fn test_file_changed_between_parts_ends_the_connection() {
-    let dir = std::env::temp_dir().join(format!("web-net-review-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("web-net-regressions-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("big.bin");
     std::fs::write(&file, vec![1u8; 3 << 20]).unwrap();

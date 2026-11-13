@@ -13,11 +13,42 @@
 
 ---
 
+## [0.10.1] - 2026-11-13
+
+Moves to serve-net 0.8.1. serve-net 0.4.0 to 0.7.1 are yanked for two
+security fixes, so 0.10.0 can no longer be resolved from scratch.
+
+### Security
+
+- serve-net 0.8 answers a TLS request whose `Host` names another server than
+  the TLS server name with `421 Misdirected Request` before web-net sees it,
+  so a TLS policy chosen by server name (client certificates for one host
+  and not another) can no longer be stepped around through `Host`.
+- serve-net 0.8.1 brings net-io 0.7.2 and its fixes.
+
+### Added
+
+- `Request::tls()`: the TLS handshake when serve-net decrypted the
+  connection (server name, protocol, version, cipher suite, and the
+  SHA-256 of a verified client certificate's public key), for a gate that
+  checks a client certificate.
+
+### Changed
+
+- serve-net 0.8.1 (from 0.7.1). web-net's own API is unchanged, but the
+  serve-net types it passes through (`HttpRequest`, `Envelope`,
+  `HttpReply`, `Running`) are serve-net 0.8's now: code that names them
+  beside web-net moves to `serve-net = "0.8"` as well.
+- The tests that pin earlier fixes are `tests/regressions_0_7.rs` and
+  `tests/regressions_0_10.rs`.
+
+---
+
 ## [0.10.0] - 2026-11-12
 
-The simplified API, and the fixes from an independent review of 0.9.0.
-Every public item was checked against one test: the common case in a line
-or two, names a newcomer reads without the docs, one way to do each thing
+A simpler API, and a round of security and correctness fixes. Every public
+item was checked against one test: the common case in a line or two, names
+a newcomer reads without the docs, one way to do each thing
 (`dev/SIMPLICITY-0.10.md`). This release breaks the 0.9 API on purpose; the
 table below is the whole migration.
 
@@ -136,9 +167,9 @@ table below is the whole migration.
 - `docs/API.md` rewritten as a task-oriented reference with every public
   item; it and the README compile and run as doctests. Every public item
   has a runnable example of its own.
-- `dev/SIMPLICITY-0.10.md`: the audit, each finding, and what was kept with
-  its reason.
-- `docs/SECURITY.md`: the review's findings; catching panics needs
+- `dev/SIMPLICITY-0.10.md`: what changed in the API and why, and what was
+  kept with its reason.
+- `docs/SECURITY.md`: the new defences; catching panics needs
   `panic = "unwind"`.
 - The error reference is a keyed hash: it shows no connection counter.
 - The crate's own release profile unwinds (it aborted), so its examples
@@ -226,7 +257,7 @@ Hardening.
 
 ### Fixed
 
-From an independent adversarial review:
+Security fixes:
 
 - A multipart CSRF token was checked after the handler had run; it is now
   checked before any hook or handler, like a urlencoded one.
@@ -243,7 +274,7 @@ From an independent adversarial review:
 - `COM¹`, `LPT³`, `CON .txt` as asset names, and `/style.css/` under
   `TrailingSlash::Add`.
 
-From a second review:
+More fixes:
 
 - A large file changed or removed between the parts of its reply could end
   as if complete with the wrong bytes; the connection is now closed
@@ -438,7 +469,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/jamesgober/web-net/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/jamesgober/web-net/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jamesgober/web-net/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jamesgober/web-net/compare/v0.7.0...v0.8.0

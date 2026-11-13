@@ -1,5 +1,4 @@
-//! Regression tests for the second independent review (of 0.9.0). Each test
-//! failed before its fix.
+//! Bugs fixed in 0.10: each test failed before its fix.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -33,7 +32,7 @@ fn log() -> &'static Log {
     Box::leak(Box::default())
 }
 
-// ---------------------------------------------------------------- F-2
+// ---------------------------------------------------------------- panics
 
 /// Panics where the test says, on a cookie the gate does not expect.
 struct PanicGate {
@@ -55,7 +54,7 @@ impl Gate for PanicGate {
 }
 
 #[test]
-fn test_f2_gate_panic_is_answered_500_and_reported() {
+fn test_gate_panic_is_answered_500_and_reported() {
     for in_authorize in [false, true] {
         let log = log();
         let app = App::with_gate(PanicGate { in_authorize })
@@ -83,7 +82,7 @@ impl Checkpoint for PanicCheckpoint {
 }
 
 #[test]
-fn test_f2_checkpoint_panic_is_answered_500() {
+fn test_checkpoint_panic_is_answered_500() {
     let app = App::builder()
         .checkpoint(PanicCheckpoint)
         .route(get("/", |cx| cx.text(200, "ok")))
@@ -100,7 +99,7 @@ impl Events for PanicEvents {
 }
 
 #[test]
-fn test_f2_events_panic_does_not_take_the_reply() {
+fn test_events_panic_does_not_take_the_reply() {
     let app = App::builder()
         .events(PanicEvents)
         .route(get("/", |cx| cx.text(200, "ok")))
@@ -128,7 +127,7 @@ impl Render for PanicErrorPage {
 }
 
 #[test]
-fn test_f2_error_page_panic_gives_the_builtin_page() {
+fn test_error_page_panic_gives_the_builtin_page() {
     let log = log();
     let app = App::builder()
         .render(PanicErrorPage)
@@ -150,7 +149,7 @@ fn test_f2_error_page_panic_gives_the_builtin_page() {
 }
 
 #[test]
-fn test_f2_ready_check_panic_is_answered_500() {
+fn test_ready_check_panic_is_answered_500() {
     let app = App::builder()
         .ready("/readyz", || panic!("the readiness probe failed"))
         .build()
@@ -162,7 +161,7 @@ fn test_f2_ready_check_panic_is_answered_500() {
 }
 
 #[test]
-fn test_f2_handler_panic_still_500() {
+fn test_handler_panic_still_500() {
     let counter: &'static AtomicU32 = Box::leak(Box::new(AtomicU32::new(0)));
     let app = App::builder()
         .route(get("/", move |_cx| {
@@ -175,7 +174,7 @@ fn test_f2_handler_panic_still_500() {
     assert_eq!(counter.load(Ordering::Relaxed), 1);
 }
 
-// ---------------------------------------------------------------- lows
+// ---------------------------------------------------------------- routing, hosts, links
 
 #[derive(Clone, Copy, PartialEq)]
 enum Role {
@@ -210,9 +209,9 @@ impl Gate for Roles {
     }
 }
 
-/// F-4: a route the gate hides reads as missing for every method.
+/// a route the gate hides reads as missing for every method.
 #[test]
-fn test_f4_method_check_does_not_reveal_hidden_routes() {
+fn test_method_check_does_not_reveal_hidden_routes() {
     let app = App::with_gate(Roles)
         .route(get("/admin/users", |cx| cx.text(200, "users")).allow(Role::Admin))
         .route(get("/open", |cx| cx.text(200, "open")).public())
@@ -238,9 +237,9 @@ fn test_f4_method_check_does_not_reveal_hidden_routes() {
     );
 }
 
-/// F-5: with no host declared, only development hosts are the site.
+/// with no host declared, only development hosts are the site.
 #[test]
-fn test_f5_no_host_declared_answers_development_hosts_only() {
+fn test_no_host_declared_answers_development_hosts_only() {
     let app = App::builder()
         .route(get("/", |cx| cx.text(200, "x")))
         .build()
@@ -270,9 +269,9 @@ fn test_f5_no_host_declared_answers_development_hosts_only() {
     );
 }
 
-/// F-6: an upper-case literal under `lowercase_paths` could never match.
+/// an upper-case literal under `lowercase_paths` could never match.
 #[test]
-fn test_f6_uppercase_literal_with_lowercase_paths_does_not_build() {
+fn test_uppercase_literal_with_lowercase_paths_does_not_build() {
     let err = App::builder()
         .lowercase_paths()
         .route(get("/About", |cx| cx.text(200, "x")))
@@ -289,9 +288,9 @@ fn test_f6_uppercase_literal_with_lowercase_paths_does_not_build() {
     );
 }
 
-/// F-7: `Context::url` builds links inside the site only.
+/// `Context::url` builds links inside the site only.
 #[test]
-fn test_f7_url_refuses_other_hosts_and_url_path_encodes() {
+fn test_url_refuses_other_hosts_and_url_path_encodes() {
     let app = App::builder()
         .route(get("/back", |cx| {
             let to = cx.query("to")?.unwrap_or_default();
@@ -325,9 +324,9 @@ fn test_f7_url_refuses_other_hosts_and_url_path_encodes() {
     assert_eq!(r.text(), "/tags/a%3Fb%23c%2F..%2Fd");
 }
 
-/// F-8: compression keeps the handler's `Vary` and adds `accept-encoding`.
+/// compression keeps the handler's `Vary` and adds `accept-encoding`.
 #[test]
-fn test_f8_compression_adds_accept_encoding_to_vary() {
+fn test_compression_adds_accept_encoding_to_vary() {
     let app = App::builder()
         .compress(web_net::Compression::default())
         .route(get("/", |cx| {
@@ -355,9 +354,9 @@ impl Checkpoint for Deny {
     }
 }
 
-/// F-10: a checkpoint cannot answer a revoked visitor with a success.
+/// a checkpoint cannot answer a revoked visitor with a success.
 #[test]
-fn test_f10_checkpoint_deny_status_is_clamped() {
+fn test_checkpoint_deny_status_is_clamped() {
     for (given, sent) in [(200, 403), (302, 403), (600, 403), (429, 429), (503, 503)] {
         let app = App::builder()
             .checkpoint(Deny(given))
@@ -372,10 +371,10 @@ fn test_f10_checkpoint_deny_status_is_clamped() {
     }
 }
 
-/// F-11: a group's rule holds for every route in it; a route's own rule
+/// a group's rule holds for every route in it; a route's own rule
 /// adds to it, and a public route inside a group with a rule is refused.
 #[test]
-fn test_f11_group_rule_and_route_rule_both_hold() {
+fn test_group_rule_and_route_rule_both_hold() {
     let app = App::with_gate(Roles)
         .group(
             web_net::Group::at("/admin")

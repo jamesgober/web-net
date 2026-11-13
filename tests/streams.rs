@@ -1,5 +1,5 @@
 //! Large files in parts over real sockets: a download in progress keeps its
-//! bytes whatever other downloads do on its worker (review of 0.9.0, F-1).
+//! bytes whatever other downloads do on its worker.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

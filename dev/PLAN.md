@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) &rarr; [`DIRECTIVES.md`](./DIRECTIVES.md) &rarr; **this file** &rarr; [`ROADMAP.md`](./ROADMAP.md).
 >
-> **Status:** `0.10.0`: beta, simplified (`dev/SIMPLICITY-0.10.md`). Beta polish at `0.9.0` (`dev/READINESS-1.0.md`). Alpha at `0.8.0`. Hardening at `0.7.0`. Performance at `0.6.0`, negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
+> **Status:** `0.10.1`: beta, simplified, on serve-net 0.8 (`dev/SIMPLICITY-0.10.md`). Beta polish at `0.9.0` (`dev/READINESS-1.0.md`). Alpha at `0.8.0`. Hardening at `0.7.0`. Performance at `0.6.0`, negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
 
 ---
 
@@ -284,7 +284,7 @@ Every unsafe method (`POST`, `PUT`, `PATCH`, `DELETE`) on a route that is not ex
    - multipart: read up to the first file part, where the token must already have come (form-net's token placement policy), so an upload is not read twice and a forged or late token stores nothing;
    - anything else (no field, another content type): 403 `csrf.missing`.
 
-(0.4 checked a multipart token in the pass that read the form and replaced the reply when the handler never read it. An independent review in 0.7 showed the handler's side effects could happen first; the token is now checked before the handler for every encoding, D-046.)
+(0.4 checked a multipart token in the pass that read the form and replaced the reply when the handler never read it. In 0.7 it turned out the handler's side effects could happen first; the token is now checked before the handler for every encoding, D-046.)
 
 `Context::csrf_token()` issues a token for the visitor's binding, masked differently on every call.
 
@@ -375,7 +375,7 @@ src/
 
 | Crate | Since | Why |
 |---|---|---|
-| serve-net 0.7 (`http1`) | 0.2 | the server; `HttpService`, requests, replies, the testing helpers; http-net through its re-export |
+| serve-net 0.8 (`http1`) | 0.2 | the server; `HttpService`, requests, replies, the testing helpers; http-net through its re-export |
 | cookie-net 0.7 | 0.2 | reading the `Cookie` field; `SetCookie` (re-exported) from 0.3 |
 | parse-net 0.9.2 | 0.3 | entity tags, HTTP dates, `Range` and `If-Range`, `Accept-Encoding`; later `Accept` and media types |
 | form-net 0.9 | 0.4 | forms and uploads (re-exported) |
@@ -489,32 +489,33 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-068 | 2026-11-11 | `docs/API.md` and the README compile as doctests | the reference cannot drift from the API |
 | D-069 | 2026-11-11 | `ErrorPage` carries the site's base path (`base`, `url(path)`) | an error page of a site in a folder links its stylesheet and home inside the folder; the engine had no other way to learn the base |
 | D-070 | 2026-11-11 | `Denial::unavailable(code)` (503) and `Denial::retry_after(seconds)`; `with_status` still accepts 4xx only | a gate whose stores are down fails closed; clients and load balancers must read that as retryable, not as "you may not". 503 is its own constructor so a gate still cannot turn a denial into a 500 or a success |
-| D-071 | 2026-11-11 | C1 controls (U+0080 to U+009F, `%C2%80` to `%C2%9F`) are controls: refused with 400 `url.control` | D-014 refuses every control character, but only C0 and DEL were checked; NEL (U+0085) is a line break to some log readers. Found by the path property test on CI |
-| D-072 | 2026-11-11 | Large-file replies in parts: one record per reply, per application, from the first part to the last or to `HttpService::done` (implemented by `App` and `Sites`; a wrapper forwards it); never evicted; a full table (16,384) refuses a new one with 503; parts of 256 KiB, read into one reused buffer | review of 0.9.0 F-1: a per-thread table of 256 forgot downloads still in progress, which restarted from byte 0 mid-body and ended cleanly with the wrong bytes |
-| D-073 | 2026-11-11 | One `catch_unwind` around the whole pipeline (gate, checkpoint, readiness, identity), one around each event sink call, one around the error template; after a panic the built-in page answers and `Panicked` is reported; the crate's release profile unwinds | F-2: only handlers and hooks were caught, and SECURITY T-5 said otherwise |
-| D-074 | 2026-11-11 | A per-mount cache of resolutions (two seconds, a hit checked with `symlink_metadata`) and of small files' bytes (64 KiB each, 32 MiB per mount, valid while length and time hold) | F-3: every request and every part resolved the path again |
-| D-075 | 2026-11-11 | The 405 and automatic `OPTIONS` answers run after an access check: someone who may use none of the route's methods gets the gate's denial (404 for a hidden route) | F-4: they revealed routes the gate hides; replaces O-6's answer |
-| D-076 | 2026-11-11 | With no host declared, the site is the development hosts only; `Builder::any_host` answers every host | F-5: any `Host` was the site by default, the opening for DNS rebinding against internal tools |
-| D-077 | 2026-11-11 | With `lowercase_paths`, an upper-case route literal is a build problem | F-6: it built and could never match |
-| D-078 | 2026-11-11 | `Context::url` (and `ErrorPage::url`) refuse a target that is not a site path (`url.not_local`); `Context::url_path` encodes each segment | F-7: `url("//evil.example")` gave a link to another host |
-| D-079 | 2026-11-11 | Compression adds `accept-encoding` to a handler's own `Vary` | F-8: it dropped it, so a cache keyed on the handler's names could hand gzip to a client that did not accept it |
-| D-080 | 2026-11-11 | Large files keep going out chunked, without `Content-Length` (O-9) | F-9: serve-net has no declared-length stream and refuses the field from a service |
-| D-081 | 2026-11-11 | A checkpoint's `Deny { status }` outside 400 to 599 is answered as 403, at both stages | F-10: `Deny { status: 200 }` answered a revoked visitor with a success status |
-| D-082 | 2026-11-11 | A group's rule holds for every route in it: a route's own rule adds to it (both checked, outermost first); a route declared public inside a group with a rule stops the build | F-11: a route's rule replaced its group's, so narrowing one admin route opened it to non-admins |
-| D-083 | 2026-11-11 | cookie-net 0.8, form-net 0.10, csrf-sec 0.10, compress-lib 1.0, parse-net 0.9.3; the README says which third-party crates come through crypt-io | F-12: the README claimed none, and three parse-net versions were built; two remain (0.6 through form-net, 0.7 through serve-net's http-net), asked of those crates |
-| D-084 | 2026-11-11 | `Cx` is `Context`; every public item has its own runnable example; `escape_html`; the reference is a keyed hash (no counter shows); notes on wildcards, unwinding, entity-tag granularity, and BREACH | F-13 and the review's notes N-1 to N-6 |
+| D-071 | 2026-11-11 | C1 controls (U+0080 to U+009F, `%C2%80` to `%C2%9F`) are controls: refused with 400 `url.control` | D-014 refuses every control character, but only C0 and DEL were checked; NEL (U+0085) is a line break to some log readers. found by the path property test |
+| D-072 | 2026-11-11 | Large-file replies in parts: one record per reply, per application, from the first part to the last or to `HttpService::done` (implemented by `App` and `Sites`; a wrapper forwards it); never evicted; a full table (16,384) refuses a new one with 503; parts of 256 KiB, read into one reused buffer | a per-thread table of 256 forgot downloads still in progress, which restarted from byte 0 mid-body and ended cleanly with the wrong bytes |
+| D-073 | 2026-11-11 | One `catch_unwind` around the whole pipeline (gate, checkpoint, readiness, identity), one around each event sink call, one around the error template; after a panic the built-in page answers and `Panicked` is reported; the crate's release profile unwinds | only handlers and hooks were caught, though SECURITY T-5 said all were |
+| D-074 | 2026-11-11 | A per-mount cache of resolutions (two seconds, a hit checked with `symlink_metadata`) and of small files' bytes (64 KiB each, 32 MiB per mount, valid while length and time hold) | every request and every part resolved the path again |
+| D-075 | 2026-11-11 | The 405 and automatic `OPTIONS` answers run after an access check: someone who may use none of the route's methods gets the gate's denial (404 for a hidden route) | they revealed routes the gate hides; this replaces O-6's first answer |
+| D-076 | 2026-11-11 | With no host declared, the site is the development hosts only; `Builder::any_host` answers every host | any `Host` was the site by default, the opening for DNS rebinding against internal tools |
+| D-077 | 2026-11-11 | With `lowercase_paths`, an upper-case route literal is a build problem | it built and could never match |
+| D-078 | 2026-11-11 | `Context::url` (and `ErrorPage::url`) refuse a target that is not a site path (`url.not_local`); `Context::url_path` encodes each segment | `url("//evil.example")` gave a link to another host |
+| D-079 | 2026-11-11 | Compression adds `accept-encoding` to a handler's own `Vary` | it dropped it, so a cache keyed on the handler's names could hand gzip to a client that did not accept it |
+| D-080 | 2026-11-11 | Large files keep going out chunked, without `Content-Length` (O-9) | serve-net has no declared-length stream and refuses the field from a service |
+| D-081 | 2026-11-11 | A checkpoint's `Deny { status }` outside 400 to 599 is answered as 403, at both stages | `Deny { status: 200 }` answered a revoked visitor with a success status |
+| D-082 | 2026-11-11 | A group's rule holds for every route in it: a route's own rule adds to it (both checked, outermost first); a route declared public inside a group with a rule stops the build | a route's rule replaced its group's, so narrowing one admin route opened it to non-admins |
+| D-083 | 2026-11-11 | cookie-net 0.8, form-net 0.10, csrf-sec 0.10, compress-lib 1.0, parse-net 0.9.3; the README says which third-party crates come through crypt-io | the README claimed none, and three parse-net versions were built; two remain (0.6 through form-net, 0.7 through serve-net's http-net), asked of those crates |
+| D-084 | 2026-11-11 | `Cx` is `Context`; every public item has its own runnable example; `escape_html`; the reference is a keyed hash (no counter shows); notes on wildcards, unwinding, entity-tag granularity, and BREACH | plain names, examples on every item, and the small gaps around them |
 | D-085 | 2026-11-11 | `Request::cookie` reads every `Cookie` field as one header (each through cookie-net's `get_unique`, the total held to its length limit); a name in two fields is ambiguous | HTTP/2 and HTTP/3 split the cookie into crumbs (RFC 9113 section 8.2.3), so refusing a second field would refuse their real requests; cookie tossing is still refused by name |
+| D-086 | 2026-11-13 | serve-net 0.8.1, released as 0.10.1; `Request::tls()` | serve-net 0.4.0 to 0.7.1 were yanked for security fixes (a `Host` that differs from the TLS server name; WebSocket origins), so 0.10.0 could not be resolved. web-net's own items did not change, so a patch release keeps every `0.10` range working; code that names serve-net types moves to 0.8 with it. serve-net now refuses the `Host`/server name mismatch itself; `tls()` hands the handshake to gates. web-net serves no WebSockets, so the origin policy does not reach it |
 | D-059 | 2026-11-09 | `Sites` lets a site with lower-case paths claim upper-case spellings of its base | it redirects them itself, instead of another site answering |
 | D-060 | 2026-11-09 | The CSRF step always applies csrf-sec's origin policy and a token; csrf-sec's `Mode` setting does not loosen it | one strict rule for every route; a looser mode would need its own decision |
 | D-056 | 2026-11-09 | `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]` | web-net makes them and callers read them; a field added in 1.x must not break anyone |
 | D-057 | 2026-11-09 | `Context::next_path` reads the sign-in redirect's `next` and returns it only when it is a path of this site | the sign-in page is the classic open-redirect target |
 | D-058 | 2026-11-09 | `Render` has a generic associated view type (`type View<'a>: ?Sized`); `App`, `Builder`, `Context`, `Route`, and `Sites` are generic over the engine (`E = NoRender`); dynamic engines use `type View<'a> = dyn View + 'a` and handlers call `Context::render_view`; error pages go through `Render::error_page` | agreed with Luminess: a typed engine compiles templates at boot against the application's own types and reads them directly, which `&dyn View` cannot carry (one wrapper per nested value); a GAT keeps borrowed views working for both kinds, and static dispatch costs nothing at run time |
-| D-046 | 2026-11-09 | Multipart CSRF tokens are checked before the handler, scanning the body up to its first file part | the 0.4 design let a handler run (and change state) before its reply was replaced; found by an independent review |
+| D-046 | 2026-11-09 | Multipart CSRF tokens are checked before the handler, scanning the body up to its first file part | the 0.4 design let a handler run (and change state) before its reply was replaced |
 | D-047 | 2026-11-09 | A reply that sets a cookie is never `public`; the cacheability report needs web-net's own `Cache-Control`, no CORS policy, and no cookie | a shared cache must not spread one visitor's cookie or one origin's CORS answer |
 | D-048 | 2026-11-09 | Resolved asset names below the root pass the segment rules again | 8.3 short names reached dot files on Windows |
 | D-049 | 2026-11-09 | An asset is read before any field is written; a vanished file mid-reply closes the connection | no 500 with a file's validators and cache lifetime, no error page inside a file |
 | D-050 | 2026-11-09 | With hosts declared, an empty or missing `Host` is a 421; under `TrailingSlash::Add` a file-like path loses its slash | one rule for every request; one spelling per path |
-| D-051 | 2026-11-09 | A reply in parts remembers its file's tag; a changed or vanished file mid-reply aborts the connection | a download must never complete cleanly with the wrong bytes; found by the second review |
+| D-051 | 2026-11-09 | A reply in parts remembers its file's tag; a changed or vanished file mid-reply aborts the connection | a download must never complete cleanly with the wrong bytes |
 | D-052 | 2026-11-09 | The gate's cookie is written before the handler's fields and dropped when the handler sets the same cookie | a stale session's clear must not cancel the session the handler just created |
 | D-053 | 2026-11-09 | Any reply that sets a cookie is `private, no-store`, overriding even a handler's `public` | the pre-session id is the CSRF binding: a cached copy would hand one to every guest (login CSRF) |
 | D-054 | 2026-11-09 | Health paths keep their declared spelling under every trailing-slash policy | probes must reach them without following redirects |
