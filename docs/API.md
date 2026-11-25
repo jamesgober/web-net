@@ -7,6 +7,8 @@
     <sup>
         <a href="../README.md" title="Project Home"><b>HOME</b></a>
         <span>&nbsp;│&nbsp;</span>
+        <a href="./README.md" title="Documentation"><b>DOCS</b></a>
+        <span>&nbsp;│&nbsp;</span>
         <span>API</span>
         <span>&nbsp;│&nbsp;</span>
         <a href="./SECURITY.md" title="Security"><b>SECURITY</b></a>
@@ -16,7 +18,7 @@
 </div>
 <br>
 
-A task-oriented tour of the 0.10 API, with every public item. The rustdoc
+A task-oriented tour of the 0.11 API, with every public item. The rustdoc
 on [docs.rs](https://docs.rs/web-net) has the same items one by one; every
 example here is compiled and run as a doctest, so this page cannot drift
 from the code. The design and its reasons are in
@@ -24,17 +26,25 @@ from the code. The design and its reasons are in
 
 - [Setup](#setup)
 - [A site in five lines](#a-site-in-five-lines)
-- [Handlers: `Context`](#handlers-cx)
+- [Handlers: `Context`](#handlers-context)
+  - [Reading the request](#reading-the-request)
+  - [Writing the reply](#writing-the-reply)
+  - [Your own identity type](#your-own-identity-type)
 - [Routes and groups](#routes-and-groups)
 - [The site: hosts, folder, URLs](#the-site-hosts-folder-urls)
 - [Gates: who is asking, and may they](#gates-who-is-asking-and-may-they)
 - [Forms, uploads, CSRF](#forms-uploads-csrf)
 - [Templates](#templates)
+  - [A typed engine](#a-typed-engine)
+  - [A dynamic engine](#a-dynamic-engine)
 - [Static files and health](#static-files-and-health)
 - [Headers, caching, compression, CORS](#headers-caching-compression-cors)
 - [Hooks](#hooks)
 - [Events and checkpoints](#events-and-checkpoints)
 - [Behind a front, and several sites](#behind-a-front-and-several-sites)
+  - [One request from a front](#one-request-from-a-front)
+  - [Several sites](#several-sites)
+  - [What a request carries](#what-a-request-carries)
 - [Errors](#errors)
 - [Constants and re-exports](#constants-and-re-exports)
 - [Examples in the repository](#examples-in-the-repository)
@@ -43,13 +53,13 @@ from the code. The design and its reasons are in
 
 ```toml
 [dependencies]
-web-net = "0.10"
+web-net = "0.11"
 # For multipart uploads to temporary files:
-# web-net = { version = "0.10", features = ["uploads"] }
+# web-net = { version = "0.11", features = ["uploads"] }
 ```
 
 web-net runs on serve-net. `App::listen` starts a server with serve-net's
-defaults, so most sites need no other dependency; add `serve-net = "0.8"`
+defaults, so most sites need no other dependency; add `serve-net = "0.9"`
 for TLS, several listeners, other limits, or `serve_net::testing` in tests.
 
 ## A site in five lines
@@ -115,6 +125,8 @@ assert_eq!(r.text(), "user 7, tab posts");
 # Ok::<(), web_net::BuildError>(())
 ```
 
+### Reading the request
+
 Reading the request:
 
 | Method | Returns |
@@ -134,6 +146,8 @@ Reading the request:
 | `next_path()` | `Result<Option<String>>`: the `next` a sign-in redirect carried, only when it is a path of this site |
 | `url(path)` | `Result<String>`: a site path with the base path in front, for links; 500 `url.not_local` for anything else (`//host`, `https://..`) |
 | `url_path(&[segments])` | `String`: a link from segments, each encoded (`["tags", tag]`), for paths built from input |
+
+### Writing the reply
 
 Writing the reply. Each of the first five is a whole reply and returns
 `Result`, so a handler ends with it:
@@ -174,6 +188,8 @@ let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\
 assert_eq!(r.status, 304);
 # Ok::<(), web_net::BuildError>(())
 ```
+
+### Your own identity type
 
 A closure that reads fields of your own identity type names its parameter,
 because Rust checks the closure before the builder fixes the type. Named
@@ -452,6 +468,8 @@ Refusal codes: `csrf.no_binding`, `csrf.missing`, `csrf.duplicate`,
 
 ## Templates
 
+### A typed engine
+
 An engine implements `Render`; web-net depends on none. A typed engine
 compiles against the application's own types; a dynamic engine reads any
 `View`. Set it with `Builder::render(engine)` before routes and hooks (their
@@ -482,6 +500,8 @@ let r = serve_net::testing::respond(&app, b"GET / HTTP/1.1\r\nHost: localhost\r\
 assert_eq!(r.text(), "<h1>Home</h1>");
 # Ok::<(), web_net::BuildError>(())
 ```
+
+### A dynamic engine
 
 A dynamic engine sets `type View<'a> = dyn View + 'a` and reads values by
 key. `Fields` is a ready-made view:
@@ -569,6 +589,11 @@ short names are refused).
   a rewrite of the same size within the file system's time granularity (two
   seconds on FAT, coarse on some network shares) keeps the tag. Files whose
   names change with their content avoid that.
+- Over HTTP/2 serve-net cannot send a reply in parts yet, so there a file
+  up to 16 MiB goes whole (HEAD too) and a larger one is refused with 500
+  `assets.too_large_for_h2`. HTTP/2 is recognised by the TLS protocol
+  (`h2`); behind a proxy that speaks HTTP/2 with prior knowledge it cannot
+  be seen, and serve-net refuses the reply in parts itself.
 - A file over 1 MiB goes out in 256 KiB parts, chunked: serve-net has no
   stream with a declared length yet, so it carries no `Content-Length`
   (HEAD included). Each part checks the file is the one the first part
@@ -686,6 +711,8 @@ assert_eq!(seen.0.load(Ordering::Relaxed), 1);
 
 ## Behind a front, and several sites
 
+### One request from a front
+
 A gateway that authenticated a request already calls `App::respond` with
 the identity: web-net does not call the gate's `authenticate` (nor write
 the gate's cookie), and authorization still runs per route. The report says
@@ -728,6 +755,8 @@ assert_eq!(r.text(), "hi");
 | `Sites::new().site(app).site(app2)` | several apps in one server, picked by host and base path |
 | `Sites::listen(addr)`, `Sites::respond(..)`, `Sites::pick(&HttpRequest)` | as on `App`; which app a request goes to |
 
+### Several sites
+
 ```rust
 use web_net::{App, Sites, get};
 
@@ -738,6 +767,8 @@ let r = serve_net::testing::respond(&sites, b"GET /blog/ HTTP/1.1\r\nHost: examp
 assert_eq!(r.text(), "blog");
 # Ok::<(), web_net::BuildError>(())
 ```
+
+### What a request carries
 
 `Request` is what gates and handlers read: `method()`, `path()` (canonical,
 inside the site), `query()`, `host()`, `header(name)`, `header_str(name)`,

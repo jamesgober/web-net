@@ -4,7 +4,7 @@
 >
 > **Read order:** [`../REPS.md`](../REPS.md) &rarr; [`DIRECTIVES.md`](./DIRECTIVES.md) &rarr; **this file** &rarr; [`ROADMAP.md`](./ROADMAP.md).
 >
-> **Status:** `0.10.1`: beta, simplified, on serve-net 0.8 (`dev/SIMPLICITY-0.10.md`). Beta polish at `0.9.0` (`dev/READINESS-1.0.md`). Alpha at `0.8.0`. Hardening at `0.7.0`. Performance at `0.6.0`, negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
+> **Status:** `0.11.0`: beta, simplified, on serve-net 0.9 (`dev/SIMPLICITY-0.10.md`). Beta polish at `0.9.0` (`dev/READINESS-1.0.md`). Alpha at `0.8.0`. Hardening at `0.7.0`. Performance at `0.6.0`, negotiation and caching at `0.5.0`, actions at `0.4.0`, static files at `0.3.0`, core and design lock at `0.2.0`. The plan below was revised at 0.2.0 (D-005 to D-020): hooks replace middleware, a gate trait replaces per-crate adapters, and rendering reads typed views.
 
 ---
 
@@ -375,7 +375,7 @@ src/
 
 | Crate | Since | Why |
 |---|---|---|
-| serve-net 0.8 (`http1`) | 0.2 | the server; `HttpService`, requests, replies, the testing helpers; http-net through its re-export |
+| serve-net 0.9 (`http1`) | 0.2 | the server; `HttpService`, requests, replies, the testing helpers; http-net through its re-export |
 | cookie-net 0.7 | 0.2 | reading the `Cookie` field; `SetCookie` (re-exported) from 0.3 |
 | parse-net 0.9.2 | 0.3 | entity tags, HTTP dates, `Range` and `If-Range`, `Accept-Encoding`; later `Accept` and media types |
 | form-net 0.9 | 0.4 | forms and uploads (re-exported) |
@@ -427,6 +427,7 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | O-8 | Request bodies streamed by serve-net (`BodyPolicy::Stream`) | not supported: web-net reads the body once, buffered (serve-net's default), for CSRF and forms; a route that needs streaming uploads is a 1.x addition |
 | O-7 | Ask serve-net for an explicit abort of a reply in parts (today web-net returns `Deferred` without deferring, which serve-net answers with an abortive close once the head has left) | yes, for serve-net 0.8 or 0.9 |
 | O-6 | Should 405 and automatic `OPTIONS` answer before authorization (revealing a route's methods to anyone)? | answered at 0.10 (D-075): no. They go only to someone who may use one of the route's methods; CORS preflights, which carry no credentials, still answer before the gate |
+| O-10 | Ask serve-net for replies in parts over HTTP/2, and for a way to tell an HTTP/2 stream from an HTTP/1.1 request (h2c with prior knowledge shows nothing to the service) | yes, for serve-net 0.10; until then large files go whole over HTTP/2 up to 16 MiB (D-087) |
 | O-9 | Ask serve-net for a reply in parts with a declared length, so a large file carries `Content-Length` (GET and HEAD; today both are chunked, and an HTTP/1.0 client cannot tell a cut-short body from a whole one) | yes, for serve-net 0.8 or 0.9; web-net cannot set the field itself (serve-net treats a service's `content-length` as a framing field) |
 
 ---
@@ -505,6 +506,7 @@ The held reply costs one copy of the body. It buys the guarantee that a failed h
 | D-084 | 2026-11-11 | `Cx` is `Context`; every public item has its own runnable example; `escape_html`; the reference is a keyed hash (no counter shows); notes on wildcards, unwinding, entity-tag granularity, and BREACH | plain names, examples on every item, and the small gaps around them |
 | D-085 | 2026-11-11 | `Request::cookie` reads every `Cookie` field as one header (each through cookie-net's `get_unique`, the total held to its length limit); a name in two fields is ambiguous | HTTP/2 and HTTP/3 split the cookie into crumbs (RFC 9113 section 8.2.3), so refusing a second field would refuse their real requests; cookie tossing is still refused by name |
 | D-086 | 2026-11-13 | serve-net 0.8.1, released as 0.10.1; `Request::tls()` | serve-net 0.4.0 to 0.7.1 were yanked for security fixes (a `Host` that differs from the TLS server name; WebSocket origins), so 0.10.0 could not be resolved. web-net's own items did not change, so a patch release keeps every `0.10` range working; code that names serve-net types moves to 0.8 with it. serve-net now refuses the `Host`/server name mismatch itself; `tls()` hands the handshake to gates. web-net serves no WebSockets, so the origin policy does not reach it |
+| D-087 | 2026-11-25 | serve-net 0.9, released as 0.11.0; over HTTP/2 (TLS with `h2`) static files go whole up to 16 MiB, larger ones are 500 `assets.too_large_for_h2`; a later part with no record ends the connection (`is_streamed`) | serve-net 0.9 refuses a reply in parts on an HTTP/2 stream. A minor release, not a patch: the serve-net types web-net passes through changed major version while 0.8 is still current, so a patch would break crates that name them on `cargo update` |
 | D-059 | 2026-11-09 | `Sites` lets a site with lower-case paths claim upper-case spellings of its base | it redirects them itself, instead of another site answering |
 | D-060 | 2026-11-09 | The CSRF step always applies csrf-sec's origin policy and a token; csrf-sec's `Mode` setting does not loosen it | one strict rule for every route; a looser mode would need its own decision |
 | D-056 | 2026-11-09 | `Event`, `Served`, `Classified`, and `Problem` are `#[non_exhaustive]` | web-net makes them and callers read them; a field added in 1.x must not break anyone |
