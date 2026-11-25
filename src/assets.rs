@@ -32,6 +32,10 @@ use crate::url;
 /// ```
 pub const INLINE_LIMIT: u64 = 1 << 20;
 
+/// On a connection that cannot send a reply in parts (HTTP/2 in serve-net
+/// 0.9), files up to this size go whole; larger ones are refused.
+pub(crate) const WHOLE_LIMIT: u64 = 16 << 20;
+
 /// The size of one part of a file sent in parts.
 const PART: usize = 256 << 10;
 
@@ -41,7 +45,7 @@ const PART: usize = 256 << 10;
 /// a cut-short body and never a clean end with the wrong bytes.
 /// (`Outcome::Close` would end the chunked body cleanly.) serve-net is
 /// asked for an explicit abort (PLAN O-7).
-const ABORT: Outcome = Outcome::Deferred;
+pub(crate) const ABORT: Outcome = Outcome::Deferred;
 
 /// A request whose large file is going out in parts: its connection and
 /// request number.
@@ -599,14 +603,20 @@ pub(crate) enum Unserved {
     Unreadable,
     /// The application follows [`MAX_STREAMS`] large replies already: 503.
     Busy,
+    /// Over [`WHOLE_LIMIT`] on a connection that cannot send it in parts:
+    /// 500.
+    TooLargeWhole,
 }
 
-/// Answers a request for a file.
+/// Answers a request for a file. `parts` says whether the connection can
+/// send a reply in parts (HTTP/1.x); without it a file goes whole, up to
+/// [`WHOLE_LIMIT`].
 pub(crate) fn serve(
     assets: &Assets,
     found: &Found<'_>,
     streams: &Streams,
     key: StreamKey,
+    parts: bool,
     req: &HttpRequest<'_>,
     reply: &mut HttpReply,
 ) -> Result<Outcome, Unserved> {
@@ -701,7 +711,8 @@ pub(crate) fn serve(
         reply.body(&bytes[from..from + len as usize]);
         return Ok(Outcome::Done);
     }
-    if len <= INLINE_LIMIT {
+    let whole = if parts { INLINE_LIMIT } else { WHOLE_LIMIT };
+    if len <= whole {
         return PART_BUF.with(|buf| {
             let mut buf = buf.borrow_mut();
             read_into(&stream, start, len as usize, &mut buf).ok_or(Unserved::Unreadable)?;
@@ -721,6 +732,9 @@ pub(crate) fn serve(
             shrink(&mut buf);
             Ok(Outcome::Done)
         });
+    }
+    if !parts {
+        return Err(Unserved::TooLargeWhole);
     }
     // Large: the file must open and still be what was found.
     open_same(&stream).ok_or(Unserved::Unreadable)?;
@@ -856,6 +870,96 @@ mod tests {
             start: 0,
             total: 1,
         }
+    }
+
+    /// Serves one mount as an HTTP/2 connection would: no replies in parts.
+    struct Whole {
+        assets: Assets,
+        streams: Streams,
+    }
+
+    impl serve_net::HttpService for Whole {
+        fn call(
+            &self,
+            req: &HttpRequest<'_>,
+            env: &serve_net::Envelope,
+            reply: &mut HttpReply,
+        ) -> Outcome {
+            let rel = self.assets.strip(req.path()).unwrap_or("/");
+            let key = (env.connection().get(), env.seq().get());
+            let Some(found) = find(&self.assets, rel, None) else {
+                reply.status(404);
+                return Outcome::Done;
+            };
+            match serve(&self.assets, &found, &self.streams, key, false, req, reply) {
+                Ok(outcome) => outcome,
+                Err(Unserved::TooLargeWhole) => {
+                    reply.status(500).header("x-why", "too-large");
+                    Outcome::Done
+                }
+                Err(_) => {
+                    reply.status(500);
+                    Outcome::Done
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_without_parts_large_files_go_whole_up_to_the_limit() {
+        let dir = std::env::temp_dir().join(format!("web-net-whole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big: Vec<u8> = (0..(3 << 20) + 7).map(|i| (i % 253) as u8).collect();
+        std::fs::write(dir.join("big.bin"), &big).unwrap();
+        std::fs::write(dir.join("huge.bin"), vec![1u8; (WHOLE_LIMIT + 1) as usize]).unwrap();
+        let mut assets = Assets::new("/s", &dir);
+        assets.root = std::fs::canonicalize(&dir).unwrap();
+        // serve-net's `respond` reads small replies only: parse the raw reply.
+        let send = |raw: &str| {
+            let mut conn = serve_net::testing::TestConnection::new(Whole {
+                assets: assets.clone(),
+                streams: Streams::default(),
+            });
+            let mut out = Vec::new();
+            conn.send_into(raw.as_bytes(), &mut out);
+            let end = out
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .expect("a head");
+            let head = String::from_utf8_lossy(&out[..end]).to_ascii_lowercase();
+            let status: u16 = head[9..12].parse().unwrap();
+            let field = |name: &str| {
+                head.lines()
+                    .find_map(|l| l.strip_prefix(&format!("{name}: ")).map(str::to_owned))
+            };
+            (
+                status,
+                field("content-length"),
+                field("transfer-encoding"),
+                field("x-why"),
+                out[end + 4..].to_vec(),
+            )
+        };
+
+        let (status, length, chunked, _, body) = send("GET /s/big.bin HTTP/1.1\r\nHost: a\r\n\r\n");
+        assert_eq!((status, chunked), (200, None), "whole, not chunked");
+        assert_eq!(length, Some(big.len().to_string()));
+        assert!(body == big);
+
+        let (status, _, _, _, body) =
+            send("GET /s/big.bin HTTP/1.1\r\nHost: a\r\nRange: bytes=1048570-2097160\r\n\r\n");
+        assert_eq!(status, 206);
+        assert!(body == big[1_048_570..=2_097_160]);
+
+        let (status, length, chunked, _, body) =
+            send("HEAD /s/big.bin HTTP/1.1\r\nHost: a\r\n\r\n");
+        assert_eq!((status, chunked), (200, None));
+        assert_eq!(length, Some(big.len().to_string()));
+        assert!(body.is_empty());
+
+        let (status, _, _, why, _) = send("GET /s/huge.bin HTTP/1.1\r\nHost: a\r\n\r\n");
+        assert_eq!((status, why.as_deref()), (500, Some("too-large")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

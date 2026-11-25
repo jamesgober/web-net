@@ -13,6 +13,36 @@
 
 ---
 
+## [0.11.0] - 2026-11-25
+
+Moves to serve-net 0.9, which adds HTTP/2.
+
+### Changed (breaking)
+
+- serve-net 0.9 (from 0.8). web-net's own API is unchanged, but the
+  serve-net types it passes through (`HttpRequest`, `Envelope`,
+  `HttpReply`, `Running`) are serve-net 0.9's now. Code that names them
+  beside web-net moves to `serve-net = "0.9"` too; nothing else changes.
+
+### Fixed
+
+- Static files over HTTP/2: serve-net 0.9 cannot send a reply in parts on
+  an HTTP/2 stream, so a file over 1 MiB was a 500 there. A file up to
+  16 MiB now goes whole over HTTP/2 (HEAD too); a larger one is refused
+  with 500 `assets.too_large_for_h2`. HTTP/1.1 is unchanged.
+- A later part of a large file whose record is gone now ends the
+  connection instead of starting the file again, using serve-net's new
+  `is_streamed` check.
+
+### Documentation
+
+- The README follows the standard layout (features, why, installation,
+  status, troubleshooting, version compatibility), with all six badges.
+- `docs/README.md` indexes the documents; `docs/API.md` links to it and
+  has a nested table of contents.
+
+---
+
 ## [0.10.1] - 2026-11-13
 
 Moves to serve-net 0.8.1. serve-net 0.4.0 to 0.7.1 are yanked for two
@@ -469,7 +499,8 @@ The scaffold and the plan. No functional code yet.
 - `dev/PLAN.md` (purpose, scope, architecture, threats, ecosystem, open
   decisions, decision log), `dev/DIRECTIVES.md`, and `dev/ROADMAP.md`.
 
-[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/jamesgober/web-net/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/jamesgober/web-net/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/jamesgober/web-net/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/jamesgober/web-net/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/jamesgober/web-net/compare/v0.8.0...v0.9.0

@@ -2158,6 +2158,11 @@ impl<G: Gate, E: Render> App<G, E> {
             // reply inside this one.
             return Some(assets::next_part(&self.streams, key, stream, reply));
         }
+        if reply.parts().is_streamed() {
+            // A later part whose record is gone: end the connection rather
+            // than start the file again inside the reply.
+            return Some(assets::ABORT);
+        }
         let found = assets::find(assets, rel, http.header("accept-encoding"));
         let Some(found) = found else {
             self.refuse(
@@ -2171,7 +2176,8 @@ impl<G: Gate, E: Render> App<G, E> {
             );
             return Some(Outcome::Done);
         };
-        match assets::serve(assets, &found, &self.streams, key, http, reply) {
+        let parts = !speaks_h2(at.env);
+        match assets::serve(assets, &found, &self.streams, key, parts, http, reply) {
             Ok(outcome) => {
                 self.secure(reply, at.tls, |_| false);
                 Some(outcome)
@@ -2189,6 +2195,19 @@ impl<G: Gate, E: Render> App<G, E> {
                     reply,
                 );
                 reply.header("retry-after", "5");
+                Some(Outcome::Done)
+            }
+            Err(assets::Unserved::TooLargeWhole) => {
+                // serve-net sends no reply in parts over HTTP/2 yet.
+                self.refuse(
+                    500,
+                    "assets.too_large_for_h2",
+                    EventKind::Failed,
+                    None,
+                    None,
+                    at,
+                    reply,
+                );
                 Some(Outcome::Done)
             }
             Err(assets::Unserved::Unreadable) => {
@@ -2651,6 +2670,18 @@ impl<G: Gate, E: Render> fmt::Debug for App<G, E> {
     }
 }
 
+/// Whether the request came over HTTP/2: serve-net serves HTTP/2 only on a
+/// TLS connection that negotiated `h2`, or with prior knowledge behind a
+/// proxy, which a service cannot see (that case answers like HTTP/1.1 and
+/// serve-net refuses a reply in parts on it).
+fn speaks_h2(env: &Envelope) -> bool {
+    alpn_is_h2(env.tls())
+}
+
+fn alpn_is_h2(tls: Option<&serve_net::net_io::TlsInfo>) -> bool {
+    tls.and_then(|t| t.alpn()) == Some(b"h2")
+}
+
 /// Whether the client prefers JSON to HTML (no `Accept`: HTML).
 fn wants_json(accept: Option<&[u8]>) -> bool {
     // Most requests never name JSON: skip the parse for them.
@@ -2717,6 +2748,18 @@ fn encode_component(s: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_alpn_is_h2() {
+        use serve_net::net_io::TlsInfo;
+        let h2 = TlsInfo::new(Some("a.test"), Some(b"h2"), 0x0304, 0x1301);
+        let h1 = TlsInfo::new(Some("a.test"), Some(b"http/1.1"), 0x0304, 0x1301);
+        let none = TlsInfo::new(Some("a.test"), None, 0x0304, 0x1301);
+        assert!(alpn_is_h2(h2.as_ref()));
+        assert!(!alpn_is_h2(h1.as_ref()));
+        assert!(!alpn_is_h2(none.as_ref()));
+        assert!(!alpn_is_h2(None));
+    }
 
     #[test]
     fn test_split_port() {
